@@ -58,7 +58,13 @@ function Get-DateLikeFields {
     if ($Obj -is [pscustomobject]) {
         foreach ($p in $Obj.PSObject.Properties) {
             $path = if ($Prefix) { "$Prefix.$($p.Name)" } else { $p.Name }
-            if ($p.Name -match '(?i)date|modified|updated|created|timestamp|lastChange') { "$path=$($p.Value)" }
+            # 'create' and 'time' also catch createTime (workflow jobs) and *DateTime fields. *By fields
+            # (createdBy, modifiedBy) hold user emails, not dates, so they're excluded.
+            if ($p.Name -match '(?i)date|modified|updated|create|time|lastChange' -and $p.Name -notmatch '(?i)By$') {
+                # ConvertFrom-Json turns ISO strings into [datetime]; print those as ISO, not in the local culture.
+                $v = if ($p.Value -is [datetime]) { $p.Value.ToString('o') } else { $p.Value }
+                "$path=$v"
+            }
             elseif ($p.Value -is [pscustomobject] -or ($p.Value -is [System.Collections.IEnumerable] -and $p.Value -isnot [string])) {
                 Get-DateLikeFields -Obj $p.Value -Prefix $path -Depth ($Depth + 1)
             }
@@ -71,7 +77,12 @@ function Invoke-Probe {
     $uri = "$($envCfg.ApiBase)$Path"
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $params = @{ Method = $Method; Uri = $uri; Headers = $headers; SkipHttpErrorCheck = $true }
-    if ($Body) { $params.Body = ($Body | ConvertTo-Json -Depth 10 -Compress); $params.ContentType = 'application/json' }
+    # Send UTF-8 bytes explicitly: before PowerShell 7.4 a string body without a charset isn't UTF-8,
+    # which would corrupt names such as Zoë or O’Brien in the T13 write test.
+    if ($Body) {
+        $params.Body = [System.Text.Encoding]::UTF8.GetBytes(($Body | ConvertTo-Json -Depth 10 -Compress))
+        $params.ContentType = 'application/json; charset=utf-8'
+    }
     $r = Invoke-WebRequest @params
     $sw.Stop()
     $status = [int]$r.StatusCode
@@ -98,35 +109,99 @@ function Invoke-Probe {
 # would overwrite the real TFN with 'Provided'.
 function ConvertTo-BglContactUpdate {
     param([Parameter(Mandatory)]$Contact)
-    $fields = 'title', 'firstName', 'lastName', 'otherName', 'preferredName', 'name', 'sex', 'birthday',
-              'birthPlace', 'birthState', 'birthCountry', 'dateOfDeath', 'din', 'abn', 'acn', 'email',
-              'telephone', 'mobile', 'smsfAuditorNumber', 'professionalBody', 'professionalBodyNumber',
-              'usi', 'memberAccountNumber', 'spin', 'establishmentDate'
+    # Which contact types BGL's PUT table allows each field for. Sending a field to the wrong type can
+    # give a 400 that would read as "no write permission". din has no stated restriction.
+    $people = 'title', 'firstName', 'lastName', 'otherName', 'preferredName', 'sex', 'birthday', 'birthPlace',
+              'birthState', 'birthCountry', 'dateOfDeath', 'email', 'mobile', 'smsfAuditorNumber',
+              'professionalBody', 'professionalBodyNumber'
+    $byType = @{
+        People      = $people + 'telephone'
+        Company     = 'name', 'acn', 'telephone'
+        OtherEntity = 'name', 'usi', 'memberAccountNumber', 'spin'
+        Trust       = 'name', 'establishmentDate'
+    }
+    $type = "$($Contact.contactType)" -replace '\s', ''   # GET says OtherEntity, the PUT table says Other Entity
+    if (-not $byType.ContainsKey($type)) { Write-Warning "Unknown contactType '$($Contact.contactType)' - sending only abn, din and address." }
+    $fields = @('abn', 'din') + @($byType[$type])
     $out = [ordered]@{}
     foreach ($f in $fields) { if ($null -ne $Contact.$f) { $out[$f] = $Contact.$f } }
     # GET can return sex as 'MALE'; PUT accepts only 'Male'/'Female'. abn/acn are sent exactly as read:
     # converting them to numbers (as the PUT table suggests) would drop an ACN's leading zero.
     if ($out.Contains('sex')) { $out['sex'] = (Get-Culture).TextInfo.ToTitleCase("$($out['sex'])".ToLowerInvariant()) }
+    # BGL's docs disagree on GET date formats (the GET table says yyyy/MM/dd, the examples show
+    # yyyy-MM-dd), and PUT wants yyyy-MM-dd for birthday/dateOfDeath but yyyy/MM/dd for establishmentDate.
+    foreach ($f in 'birthday', 'dateOfDeath') { if ($out.Contains($f)) { $out[$f] = ConvertTo-BglDate $out[$f] 'yyyy-MM-dd' } }
+    if ($out.Contains('establishmentDate')) { $out['establishmentDate'] = ConvertTo-BglDate $out['establishmentDate'] 'yyyy/MM/dd' }
     if ($Contact.address) {
         $addr = [ordered]@{}
         foreach ($f in 'streetLine1', 'streetLine2', 'city', 'state', 'postCode', 'country') {
             if ($null -ne $Contact.address.$f) { $addr[$f] = $Contact.address.$f }
         }
+        # GET examples return full names such as 'VICTORIA'; PUT accepts only the eight codes.
+        if ($addr.Contains('state') -and "$($addr['state'])") { $addr['state'] = ConvertTo-BglStateCode $addr['state'] }
         if ($addr.Count) { $out['address'] = $addr }
     }
     [pscustomobject]$out
 }
 
-# Names of top-level fields whose values differ between two records (compared as compact JSON).
+# Reformats a date read from GET (string in yyyy-MM-dd or yyyy/MM/dd, or a [datetime] if ConvertFrom-Json
+# parsed it) into the format PUT wants. Unrecognised values are returned unchanged with a warning.
+function ConvertTo-BglDate {
+    param($Value, [string]$Format)
+    if ($Value -is [datetime]) { return $Value.ToString($Format, [Globalization.CultureInfo]::InvariantCulture) }
+    $parsed = [datetime]::MinValue
+    $inputFormats = [string[]]('yyyy-MM-dd', 'yyyy/MM/dd', "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm:ssK")
+    if ([datetime]::TryParseExact("$Value", $inputFormats, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$parsed)) {
+        return $parsed.ToString($Format, [Globalization.CultureInfo]::InvariantCulture)
+    }
+    Write-Warning "Unrecognised date '$Value' - sent unchanged."
+    $Value
+}
+
+# Maps a state name to the code PUT accepts (ACT/NSW/VIC/QLD/SA/WA/TAS/NT). Unknown values are returned
+# unchanged with a warning, so a resulting 400 can be traced to the state field.
+function ConvertTo-BglStateCode {
+    param([string]$State)
+    $codes = 'ACT', 'NSW', 'VIC', 'QLD', 'SA', 'WA', 'TAS', 'NT'
+    $names = @{
+        'AUSTRALIAN CAPITAL TERRITORY' = 'ACT'; 'NEW SOUTH WALES' = 'NSW'; 'VICTORIA' = 'VIC'; 'QUEENSLAND' = 'QLD'
+        'SOUTH AUSTRALIA' = 'SA'; 'WESTERN AUSTRALIA' = 'WA'; 'TASMANIA' = 'TAS'; 'NORTHERN TERRITORY' = 'NT'
+    }
+    $key = ($State.Trim() -replace '\s+', ' ').ToUpperInvariant()
+    if ($key -in $codes) { return $key }
+    if ($names.ContainsKey($key)) { return $names[$key] }
+    Write-Warning "State '$State' has no PUT code - sent unchanged; a 400 may come from this field."
+    $State
+}
+
+# Top-level fields whose values differ between two records (compared as compact JSON), with both
+# values so a run shows exactly what changed. entityRelationships is compared in entityRelationshipId
+# order, so a server-side reorder isn't a change. A change to address.addressId alone (BGL rewriting
+# the address row) is reported separately and flagged Harmless.
 function Compare-BglRecord {
     param([Parameter(Mandatory)]$Before, [Parameter(Mandatory)]$After)
+    $json = { param($v) ConvertTo-Json -InputObject $v -Depth 10 -Compress }
     $names = @($Before.PSObject.Properties.Name) + @($After.PSObject.Properties.Name) | Sort-Object -Unique
     foreach ($n in $names) {
-        if (($Before.$n | ConvertTo-Json -Depth 10 -Compress) -cne ($After.$n | ConvertTo-Json -Depth 10 -Compress)) { $n }
+        $a = $Before.$n; $b = $After.$n
+        if ($n -eq 'entityRelationships') {
+            $a = @($a | Sort-Object entityRelationshipId); $b = @($b | Sort-Object entityRelationshipId)
+        }
+        if ($n -eq 'address' -and $a -and $b) {
+            $aNoId = $a | Select-Object * -ExcludeProperty addressId; $bNoId = $b | Select-Object * -ExcludeProperty addressId
+            if ((& $json $aNoId) -ceq (& $json $bNoId)) {
+                if ($a.addressId -ne $b.addressId) {
+                    [pscustomobject]@{ Field = 'address.addressId'; Before = $a.addressId; After = $b.addressId; Harmless = $true }
+                }
+                continue
+            }
+        }
+        if ((& $json $a) -cne (& $json $b)) { [pscustomobject]@{ Field = $n; Before = (& $json $a); After = (& $json $b); Harmless = $false } }
     }
 }
 
-$since = (Get-Date).ToUniversalTime().AddDays(-$ModifiedAfterDays).ToString('yyyy-MM-dd')
+# BGL documents updatedAfter as yyyy-MM-dd'T'HH:mm:ss UTC (e.g. 2000-10-31T01:30:00Z) and modifiedAfter as "UTC Time".
+$since = (Get-Date).ToUniversalTime().AddDays(-$ModifiedAfterDays).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
 # Australian financial years run 1 July - 30 June and SF360 labels them by the year they end in
 # (a fund's financialYearEnd is e.g. 2021-06-30). BGL documents the parameter only as "YYYY".
 if (-not $FinancialYear) { $today = Get-Date; $FinancialYear = if ($today.Month -ge 7) { $today.Year + 1 } else { $today.Year } }
@@ -182,10 +257,17 @@ if ($WriteTestContactId) {
             if (-not $afterRecord) { Write-Warning "Could not re-read the contact (HTTP $($after.Status)) - check it by hand." }
             else {
                 # Compare the WHOLE record, not just the fields sent, so collateral damage shows up.
-                $changed = @(Compare-BglRecord -Before $record -After $afterRecord)
-                if ($changed.Count) { Write-Host "PUT HTTP $($put.Status) changed fields: $($changed -join ', ')" -ForegroundColor Red }
-                else { Write-Host "PUT HTTP $($put.Status); record unchanged." -ForegroundColor Green }
-                $results[-1] | Add-Member -NotePropertyName ChangedFields -NotePropertyValue $changed
+                $diffs = @(Compare-BglRecord -Before $record -After $afterRecord)
+                $changed = @($diffs | Where-Object { -not $_.Harmless })
+                $putOk = $put.Status -ge 200 -and $put.Status -lt 300
+                foreach ($d in $diffs) {
+                    Write-Host ("  {0}: {1} -> {2}{3}" -f $d.Field, $d.Before, $d.After, $(if ($d.Harmless) { '  (address row id only)' })) -ForegroundColor $(if ($d.Harmless) { 'DarkGray' } else { 'Red' })
+                }
+                if ($changed.Count) { Write-Host "PUT HTTP $($put.Status); changed fields: $(($changed.Field) -join ', ')" -ForegroundColor Red }
+                elseif ($putOk) { Write-Host "PUT HTTP $($put.Status); record unchanged. T13 passes." -ForegroundColor Green }
+                else { Write-Host "PUT HTTP $($put.Status) (not 2xx); record unchanged. T13 does not pass." -ForegroundColor Yellow }
+                # Results are git-ignored; they hold the before/after values of the throwaway staging contact.
+                $results[-1] | Add-Member -NotePropertyName Changes -NotePropertyValue $diffs
             }
         }
     }

@@ -1,7 +1,7 @@
 // Supporting classes for compiling custom connector code locally, as published in Microsoft Learn
 // "Use custom code in a custom connector" (learn.microsoft.com/connectors/custom-connectors/write-code).
 // CreateNotificationUri and OriginalRequestUri are undocumented. They are used only by
-// script-with-proxy.csx, and their signatures are inferred from the certified DocuSign connector.
+// script-with-proxy.csx (PROXY_VARIANT), and their signatures are inferred from the certified DocuSign connector.
 using System;
 using System.Net.Http;
 using System.Threading;
@@ -31,9 +31,11 @@ public interface IScriptContext
 
     Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken);
 
-    // Undocumented
+#if PROXY_VARIANT
+    // Undocumented. Only compiled for script-with-proxy.csx, so script.csx fails to build if it uses them.
     Uri CreateNotificationUri(string relativePath);
 
     // Undocumented
     Uri OriginalRequestUri { get; }
+#endif
 }

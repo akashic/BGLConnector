@@ -30,6 +30,10 @@ param(
     [string]$FinancialYear = '2025/2026',
     [string]$UserId = 'spike@example.com',
     [string]$BodyFile,
+    # Compact: single-line JSON. Bgl: BGL's documented webhook template, with a newline after each
+    # top-level field. Run T11 with both: Flow A re-serialises the body, which compact JSON survives
+    # but BGL's layout may not.
+    [ValidateSet('Compact', 'Bgl')][string]$BodyStyle = 'Compact',
     [ValidateSet('None', 'Body', 'Signature', 'Timestamp', 'Url', 'ClientCode', 'All')][string]$Tamper = 'None'
 )
 $ErrorActionPreference = 'Stop'
@@ -51,6 +55,10 @@ function New-Body {
         userId    = $UserId
     }
     if ($EventType -eq 'documentChange') { $msg.Insert(3, 'eventSubType', 'createdOrUpdated') }
+    if ($BodyStyle -eq 'Bgl') {
+        $fields = foreach ($k in $msg.Keys) { (ConvertTo-Json $k) + ':' + (ConvertTo-Json $msg[$k] -Depth 5 -Compress) }
+        return '{' + ($fields -join ",`n") + '}'
+    }
     $msg | ConvertTo-Json -Depth 5 -Compress
 }
 
@@ -95,4 +103,4 @@ foreach ($o in $out) {
     Write-Host ("{0,-10} HTTP {1,3}  {2,5}ms  expected {3,-6}  {4}  {5}" -f $o.Case, $o.Status, $o.Ms, $o.Expected, $o.Outcome, $o.Response) -ForegroundColor $colour
 }
 Write-Host 'Note: a receiver that only logs (no verification) will accept everything - that is expected for T11 inspection runs.' -ForegroundColor DarkGray
-Write-SpikeResult -Data ([ordered]@{ url = ($Url -replace 'sig=[^&]+', 'sig=REDACTED'); eventType = $EventType; results = $out }) -Name 'webhook-sim' | Out-Null
+Write-SpikeResult -Data ([ordered]@{ url = ($Url -replace 'sig=[^&]+', 'sig=REDACTED'); eventType = $EventType; bodyStyle = $BodyStyle; results = $out }) -Name 'webhook-sim' | Out-Null

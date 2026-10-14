@@ -106,10 +106,18 @@ function Get-BglBasicAuthHeader {
     'Basic ' + [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("$($ClientId):$($ClientSecret)"))
 }
 
-# Owner-only permissions on macOS/Linux (Windows user-profile ACLs already restrict access).
+# Owner-only permissions. On Windows the repo may be outside the user profile (e.g. C:\src), where
+# files inherit read access for all local users, so inheritance is removed and only the current user
+# is granted access.
 function Set-OwnerOnlyPermission {
     param([Parameter(Mandatory)][string]$Path, [switch]$Directory)
-    if ($IsWindows) { return }
+    if ($IsWindows) {
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $grant = if ($Directory) { "${me}:(OI)(CI)F" } else { "${me}:F" }
+        icacls $Path /inheritance:r /grant:r $grant | Out-Null
+        if ($LASTEXITCODE) { Write-Warning "Could not restrict permissions on $Path (icacls exit $LASTEXITCODE)." }
+        return
+    }
     $mode = if ($Directory) { 'UserRead, UserWrite, UserExecute' } else { 'UserRead, UserWrite' }
     try { [System.IO.File]::SetUnixFileMode($Path, [System.IO.UnixFileMode]$mode) }   # .NET 7+ (PowerShell 7.3+)
     catch { chmod $(if ($Directory) { '700' } else { '600' }) $Path }

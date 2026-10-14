@@ -38,8 +38,6 @@
       "SpikeWebhookReceiver"
     ],
     "capabilities": [],
-    "policyTemplateInstances": [],
-    "publisher": "BGL SF360 Spike",
-    "stackOwner": "BGL Corporate Solutions"
+    "policyTemplateInstances": []
   }
 }

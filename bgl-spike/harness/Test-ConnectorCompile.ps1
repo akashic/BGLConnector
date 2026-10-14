@@ -39,7 +39,8 @@ $usings = @(
     'System.IO.Compression', 'System.Linq', 'System.Net', 'System.Net.Http', 'System.Net.Http.Headers',
     'System.Net.Security', 'System.Security.Authentication', 'System.Security.Cryptography', 'System.Text',
     'System.Text.RegularExpressions', 'System.Threading', 'System.Threading.Tasks', 'System.Web', 'System.Xml',
-    'System.Xml.Linq', 'Microsoft.Extensions.Logging', 'Newtonsoft.Json', 'Newtonsoft.Json.Linq'
+    'System.Xml.Linq', 'System.Drawing', 'System.Drawing.Drawing2D', 'System.Drawing.Imaging',
+    'Microsoft.Extensions.Logging', 'Newtonsoft.Json', 'Newtonsoft.Json.Linq'
 ) | ForEach-Object { "using $_;" }
 
 $variants = 'script', 'script-with-proxy'

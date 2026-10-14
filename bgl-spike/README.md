@@ -74,8 +74,9 @@ cd harness
 ./Invoke-BglProbe.ps1
 
 # T13 - idempotent write test on STAGING. Use a THROWAWAY contact: BGL doesn't document whether PUT
-#   clears fields it isn't sent (tfn, entity relationships). The script asks for confirmation, PUTs the
-#   documented fields back unchanged, then compares the whole record and lists any field that changed.
+#   clears fields it isn't sent (tfn, entity relationships). The script asks for confirmation, PUTs back
+#   only the fields BGL's PUT table allows for the contact's type, then compares the whole record and
+#   lists any field that changed.
 ./Invoke-BglProbe.ps1 -WriteTestContactId '<staging contact id>'
 ```
 
@@ -99,7 +100,7 @@ Portal alternative: Custom connectors → New → Import an OpenAPI file. Then o
 
 **C4. Create a connection** and run `Get user details` in a test flow. That is **T04**.
 
-**C5. Swap in the proxy variant** for T09/T10:
+**C5. Swap in the proxy variant** for T09/T10. First create Flow B's trigger (Part C, Flow B step 1) and set `ProxyTargetPrefix` in `script-with-proxy.csx` to its trigger URL up to, but not including, the `?`. The proxy refuses to forward anywhere else, and refuses everything while the constant is empty. Run `Test-ConnectorCompile.ps1` again, and `Test-ConnectorSync.ps1 -AllowDeployValues` (without the switch it fails while the constant is set). **Clear `ProxyTargetPrefix` and `SpikeTestSecret` before committing**: the repo is public, and the plain sync check fails until you do. Then:
 
 ```powershell
 pac connector update --connector-id <id> --script-file ./connector/script-with-proxy.csx
@@ -133,7 +134,7 @@ Build both flows in the dev environment and delete them afterwards. An anonymous
 **Flow B — "BGL Spike – Proxy target"** (T09, T10)
 
 1. Trigger: *When an HTTP request is received*. Copy its URL.
-2. Manual flow (run once): call **Create notification proxy URL** with targetUrl = Flow B's URL. Record the returned `proxyUrl`. The code only accepts https targets on `*.logic.azure.com` or `*.api.powerplatform.com` (Power Automate and Logic Apps trigger hosts), so the proxy can't be pointed at an arbitrary URL.
+2. Manual flow (run once): call **Create notification proxy URL** with targetUrl = Flow B's URL. Record the returned `proxyUrl`. The code only accepts a target with the same host and path as `ProxyTargetPrefix` (step C5). A host allow-list wouldn't be enough: `*.logic.azure.com` and `*.api.powerplatform.com` are shared by every tenant, so anyone could point the proxy at a flow of their own.
 3. In Flow B, after the trigger:
    - Compose `Diagnostics` = `triggerBody()`
    - **Validate BGL signature** with:
@@ -149,13 +150,23 @@ Send simulator traffic:
 ./Send-BglTestWebhook.ps1 -Url '<flow A trigger URL>' -Secret 'spike-test-secret' -ClientCode spike
 ./Send-BglTestWebhook.ps1 -Url '<flow A trigger URL>' -Secret 'spike-test-secret' -ClientCode spike -Tamper All
 
+# T11 again with BGL's own body layout (a newline after each field). Flow A re-serialises the body:
+#   compact JSON survives that, BGL's layout may not, so T11 only passes if BOTH verify.
+./Send-BglTestWebhook.ps1 -Url '<flow A trigger URL>' -Secret 'spike-test-secret' -ClientCode spike -BodyStyle Bgl
+
 # T10: through the connector proxy
 ./Send-BglTestWebhook.ps1 -Url '<proxyUrl>' -Secret 'spike-test-secret' -ClientCode spike
 ```
 
 For T10 you can also put `spike-test-secret` in the `SpikeTestSecret` constant in `script-with-proxy.csx`. The receiver then tries both URLs it can see and reports which one makes the signature verify. Clear the constant afterwards.
 
-Also for T10, check whether the platform protects the proxy URL's query string. Edit the `target` parameter in `proxyUrl`, for example by base64-encoding Flow A's trigger URL instead of Flow B's, and send simulator traffic to it. If the message reaches Flow A, the platform does not sign the query and the host allow-list in the code is the only thing stopping redirection. Record that either way.
+Also for T10, check whether the platform protects the proxy URL's query string. Edit the `target` parameter in `proxyUrl`, for example by replacing it with Flow A's trigger URL encoded as `[uri]::EscapeDataString([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('<flow A URL>')))`. Percent-encoding matters: raw base64 can contain `+`, which the query parser turns into a space. Send simulator traffic to the edited URL. There are three possible outcomes:
+
+- The platform rejects the edited URL (an error before your code runs): it signs the query.
+- The code's own `400 missing required parameters` comes back: the platform passed the edited URL through, and only the `ProxyTargetPrefix` pin stopped the redirect.
+- `200 request accepted.` with the warning "No target URL to forward to": the edit was malformed (usually unencoded base64). Fix the encoding and retry.
+
+Record which one you saw. Editing a proxy URL only affects requests sent to that edited URL; BGL keeps calling the URL that is registered with it.
 
 **T12 (real BGL traffic):** register Flow A's trigger URL (or the proxy URL, if T10 passed) against the **Audit** message type in the staging Developer Portal. Wait for BGL approval, then use *Send to Audit* on a staging fund in SF360.
 
@@ -171,13 +182,13 @@ BGL signs the exact URL it calls, so the registered URL and the `bgl_spike_trigg
 | T02 | Do authorize and the 127.0.0.1 redirect work in staging? Is the staging authorize URL right? | `Get-BglToken.ps1` | Code received. If not, record the correct URL from BGL. | |
 | T03 | Which token request styles does BGL accept? | `Get-BglToken.ps1 -TestAllStyles` | Record each style. **Key question: does `FormBody` succeed?** | |
 | T04 | Does Power Platform's generic OAuth 2.0 provider work with BGL? | Create a connection (C4), run *Get user details* | Connection is created and the action returns 200 | |
-| T05 | Does BGL rotate refresh tokens? Does reusing an old one revoke the new one? Does refreshing extend the refresh token's 30-day expiry? | `Get-BglToken.ps1` refresh section | Record rotated, reusable, current-still-valid, `RefreshExpiryExtended` and `is_new_token` | |
+| T05 | Does BGL rotate refresh tokens? Does reusing an old one revoke the new one? Does refreshing extend the refresh token's 30-day expiry? | `Get-BglToken.ps1` refresh section | Record rotated, reusable, current-still-valid, `RefreshExpiryExtended` (`Extended`, `NotExtended` or `Unknown`), `RefreshExpiryDeltaSeconds` and `is_new_token` | |
 | T06 | Which endpoints does the granted scope reach? | `Invoke-BglProbe.ps1` | 200 vs 401/403 per endpoint | |
 | T07 | Does HMAC-SHA256 run in the custom code sandbox? | *Spike: signature self-test* action | `pass: true` | |
 | T08 | Can a flow verify a signature through the connector action? | Simulator → Flow A | Valid message accepted; all tamper cases rejected | |
 | T09 | Can an action create a notification proxy URL? | Proxy variant → *Create notification proxy URL* | Returns `proxyUrl` (or record the save/compile error) | |
 | T10 | Does a proxied webhook keep its Authorization header, body and a verifiable URL? Does the platform reject an edited proxy URL? | Simulator → proxyUrl → Flow B, then the edited-`target` check | Header not replaced, body intact, signature verifies against a known URL; record whether the edited URL was rejected | |
-| T11 | Does `string(triggerBody())` keep the exact bytes BGL signed? | Simulator → Flow A, compare `isValid` | Verifies. If not, raw-body fidelity rules out this design. | |
+| T11 | Does `string(triggerBody())` keep the exact bytes BGL signed? | Simulator → Flow A with `-BodyStyle Compact` and `-BodyStyle Bgl`, compare `isValid` | Both verify. If either fails, raw-body fidelity rules out this design. | |
 | T12 | What does a real BGL Audit webhook look like? Can owner apps register one? | Portal registration and *Send to Audit* | Message received and verified with the real secret | |
 | T13 | Can client details be written with the granted scope? | Probe `-WriteTestContactId` (throwaway staging contact) | PUT returns 2xx and no field changed (the script lists any that did) | |
 | T14 | Is polling feasible for SF360 changes? | Probe date fields, lodgements `modifiedAfter` | Record which endpoints expose usable change dates or filters | |
@@ -194,8 +205,9 @@ BGL signs the exact URL it calls, so the registered URL and the `bgl_spike_trigg
 
 **If T04 passes,** native connectors work for API calls. Whether a keep-alive helps depends on T05:
 
-- If refreshing extends the refresh token's expiry (`RefreshExpiryExtended` is true), add a weekly keep-alive flow that calls *Get rate limit status*. It's free against the rate limit, and each weekly call triggers a refresh once the 7-day access token has expired, which pushes the 30-day expiry out.
-- If the expiry is fixed from first consent, no keep-alive can save the connection: someone has to re-authorise it at least every 30 days, or a token-owning service (below) has to handle it.
+- If refreshing extends the refresh token's expiry (`RefreshExpiryExtended` is `Extended`), add a weekly keep-alive flow that calls *Get rate limit status*. It's free against the rate limit, and each weekly call triggers a refresh once the 7-day access token has expired, which pushes the 30-day expiry out.
+- If the expiry is fixed from first consent (`NotExtended`), no keep-alive can save the connection: someone has to re-authorise it at least every 30 days, or a token-owning service (below) has to handle it.
+- If the result is `Unknown`, BGL's refresh response didn't include `refresh_token_expires_at`. That's what BGL's documented refresh example shows, so this is the likely outcome. Don't decide on a keep-alive until BGL answers open question 3.
 
 **Webhooks:** registration is a fixed URL per message type, so a **fixed receiver** is needed:
 
@@ -211,7 +223,7 @@ BGL signs the exact URL it calls, so the registered URL and the `bgl_spike_trigg
 
 1. What is the staging authorize URL?
 2. Does `/oauth/token` accept RFC 6749 form-encoded bodies with the client credentials in the body? Is `scope` required on the token call?
-3. Do you rotate refresh tokens, and what happens if an old refresh token is reused?
+3. Do you rotate refresh tokens, and what happens if an old refresh token is reused? Does refreshing extend the refresh token's 30-day expiry (sliding), or is it fixed from first consent? Can the refresh response include `refresh_token_expires_at`, as the code exchange does?
 4. Can an **Owner Application** subscribe to webhooks? Is Audit the only SF360 message type?
 5. The webhook docs list `documentChange` with sub-types in one place, and `newDocument`/`deleteDocument`/`newStatus`/`newAttachment` in another. Which `eventType` values are actually sent today?
 6. What are the webhook retry policy, delivery timeout and source IP ranges (for allow-listing)?

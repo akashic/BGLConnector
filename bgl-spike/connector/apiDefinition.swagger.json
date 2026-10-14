@@ -111,7 +111,7 @@
             "required": true,
             "type": "string",
             "description": "BGL fund/entity ID",
-            "x-ms-summary": "fundId"
+            "x-ms-summary": "Fund ID"
           }
         ],
         "responses": {
@@ -133,18 +133,20 @@
           {
             "name": "offset",
             "in": "query",
-            "required": false,
+            "required": true,
             "type": "integer",
-            "description": "Paging offset",
-            "x-ms-summary": "offset"
+            "description": "Paging offset. BGL: required; \"Maximum amount between offset and limit must be 500\" (exact rule to be confirmed by T14/T15)",
+            "x-ms-summary": "Offset",
+            "default": 0
           },
           {
             "name": "limit",
             "in": "query",
-            "required": false,
+            "required": true,
             "type": "integer",
-            "description": "Page size",
-            "x-ms-summary": "limit"
+            "description": "Page size. BGL: required; \"Maximum amount between offset and limit must be 500\" (exact rule to be confirmed by T14/T15)",
+            "x-ms-summary": "Limit",
+            "default": 500
           }
         ],
         "responses": {
@@ -168,16 +170,16 @@
             "in": "query",
             "required": false,
             "type": "string",
-            "description": "Date, e.g. 2026-09-01",
-            "x-ms-summary": "modifiedAfter"
+            "description": "BGL documents only \"UTC Time\"; ISO 8601 UTC, e.g. 2026-09-01T00:00:00Z, is assumed",
+            "x-ms-summary": "Modified after"
           },
           {
             "name": "modifiedBefore",
             "in": "query",
             "required": false,
             "type": "string",
-            "description": "Date",
-            "x-ms-summary": "modifiedBefore"
+            "description": "BGL documents only \"UTC Time\"; ISO 8601 UTC, e.g. 2026-10-01T00:00:00Z, is assumed",
+            "x-ms-summary": "Modified before"
           }
         ],
         "responses": {
@@ -202,7 +204,7 @@
             "required": true,
             "type": "string",
             "description": "BGL fund/entity ID",
-            "x-ms-summary": "fundId"
+            "x-ms-summary": "Fund ID"
           },
           {
             "name": "tag",
@@ -210,7 +212,7 @@
             "required": false,
             "type": "string",
             "description": "Optional tag filter",
-            "x-ms-summary": "tag"
+            "x-ms-summary": "Tag"
           }
         ],
         "responses": {
@@ -366,7 +368,7 @@
             "required": false,
             "type": "string",
             "description": "Base64 target URL",
-            "x-ms-summary": "target"
+            "x-ms-summary": "Target"
           },
           {
             "name": "body",

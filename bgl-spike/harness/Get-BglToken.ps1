@@ -166,12 +166,16 @@ foreach ($s in $styles) {
     $r = Invoke-TokenRequest -Style $s -Grant @{ grant_type = 'authorization_code'; code = $code; redirect_uri = $RedirectUri }
     $results.Add($r)
     Write-Host ("{0}  HTTP {1}  {2}" -f ($(if ($r.Success) { 'SUCCESS' } else { 'FAILED ' })), $r.StatusCode, $r.Error)
-    if ($r.Success -and -not $goodToken) { $goodToken = $r.Token }
+    # Keep the newest token: each style needs a fresh consent, which may revoke tokens from earlier ones,
+    # and the refresh tests (T05) must start from a token BGL still honours.
+    if ($r.Success) { $goodToken = $r.Token }
 }
 
 $refreshResults = @()
 if ($goodToken -and -not $SkipRefreshTest) {
     Write-Host "`n=== Refresh token tests ===" -ForegroundColor Cyan
+    # refresh_token_expires_at is in whole seconds; wait so a sliding expiry can't look unchanged.
+    Start-Sleep -Seconds 2
     $currentRefresh = $goodToken.refresh_token
     $previousRefresh = $null; $workingStyle = $null
     foreach ($s in $styles) {
@@ -179,15 +183,20 @@ if ($goodToken -and -not $SkipRefreshTest) {
         $rotated = [bool]($r.Success -and $r.Token.refresh_token -and ($r.Token.refresh_token -ne $currentRefresh))
         # Does refreshing push the refresh token's expiry out (sliding), or is the 30 days fixed from first
         # consent? A keep-alive flow only helps if it slides.
+        # BGL documents refresh_token_expires_at on the code exchange but not on the refresh response, so a
+        # missing field means "unknown", not "not extended".
         $expiryBefore = $goodToken.refresh_token_expires_at
         $expiryAfter = $r.Token.refresh_token_expires_at
-        $extended = if ($r.Success -and $expiryBefore -and $expiryAfter) { [long]$expiryAfter -gt [long]$expiryBefore }
+        $deltaSeconds = if ($r.Success -and $expiryBefore -and $expiryAfter) { [long]$expiryAfter - [long]$expiryBefore }
+        $extended = if (-not $r.Success) { $null }
+                    elseif ($null -eq $deltaSeconds) { 'Unknown (refresh_token_expires_at not returned)' }
+                    elseif ($deltaSeconds -gt 0) { 'Extended' } else { 'NotExtended' }
         $refreshResults += [pscustomobject]@{
             Test = 'refresh'; Style = $s; StatusCode = $r.StatusCode; Success = [bool]$r.Success; RefreshTokenRotated = $rotated
-            RefreshExpiryBefore = $expiryBefore; RefreshExpiryAfter = $expiryAfter; RefreshExpiryExtended = $extended
+            RefreshExpiryBefore = $expiryBefore; RefreshExpiryAfter = $expiryAfter; RefreshExpiryDeltaSeconds = $deltaSeconds; RefreshExpiryExtended = $extended
             IsNewToken = $r.IsNewToken; Error = $r.Error
         }
-        Write-Host ("{0}  HTTP {1}  rotated={2}  expiryExtended={3}  {4}" -f ($(if ($r.Success) { 'SUCCESS' } else { 'FAILED ' })), $r.StatusCode, $rotated, $extended, $r.Error)
+        Write-Host ("{0}  HTTP {1}  rotated={2}  expiry={3}  {4}" -f ($(if ($r.Success) { 'SUCCESS' } else { 'FAILED ' })), $r.StatusCode, $rotated, $extended, $r.Error)
         if ($r.Success) {
             $goodToken = $r.Token; $workingStyle = $s
             if ($rotated) { $previousRefresh = $currentRefresh; $currentRefresh = $r.Token.refresh_token }

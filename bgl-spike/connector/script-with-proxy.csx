@@ -163,15 +163,21 @@ public class Script : ScriptBase
     }
     // ===== END SHARED =====
 
-    // Host suffixes used by Power Automate and Logic Apps HTTP trigger URLs.
-    private static readonly string[] AllowedTargetHostSuffixes = { ".logic.azure.com", ".api.powerplatform.com" };
+    // SET BEFORE DEPLOYING the proxy variant: Flow B's trigger URL up to (not including) the '?'.
+    // Forwarding is refused while this is empty. A host allow-list is not enough: *.logic.azure.com and
+    // *.api.powerplatform.com are shared by every tenant, so anyone could point the proxy at their own flow.
+    private const string ProxyTargetPrefix = "";
 
+    // True only for an https URL with the same host and path as ProxyTargetPrefix (the query, which
+    // carries the trigger's sig, may differ).
     private static bool IsAllowedTarget(string target)
     {
-        Uri uri;
+        Uri allowed, uri;
+        if (string.IsNullOrEmpty(ProxyTargetPrefix) || !Uri.TryCreate(ProxyTargetPrefix, UriKind.Absolute, out allowed)) return false;
         if (!Uri.TryCreate(target, UriKind.Absolute, out uri) || uri.Scheme != Uri.UriSchemeHttps) return false;
-        var host = uri.Host.ToLowerInvariant();
-        return AllowedTargetHostSuffixes.Any(s => host.EndsWith(s, StringComparison.Ordinal));
+        return string.Equals(uri.Host, allowed.Host, StringComparison.OrdinalIgnoreCase)
+            && uri.Port == allowed.Port
+            && string.Equals(uri.AbsolutePath, allowed.AbsolutePath, StringComparison.Ordinal);
     }
 
     // ---------- T09: can an ACTION create a notification proxy URL? ----------
@@ -183,7 +189,7 @@ public class Script : ScriptBase
         if (string.IsNullOrEmpty(target))
             return Json(HttpStatusCode.BadRequest, new JObject { ["message"] = "targetUrl is required" });
         if (!IsAllowedTarget(target))
-            return Json(HttpStatusCode.BadRequest, new JObject { ["message"] = "targetUrl must be an https Power Automate or Logic Apps trigger URL" });
+            return Json(HttpStatusCode.BadRequest, new JObject { ["message"] = "targetUrl must match ProxyTargetPrefix in the connector code (set it to Flow B's trigger URL before deploying)" });
 
         var encoded = Uri.EscapeDataString(Convert.ToBase64String(Encoding.UTF8.GetBytes(target)));
         var proxy = this.Context.CreateNotificationUri($"/spike/webhook?target={encoded}");
@@ -198,7 +204,10 @@ public class Script : ScriptBase
     private async Task<HttpResponseMessage> ReceiveWebhook()
     {
         var received = DateTime.UtcNow;
-        var raw = this.Context.Request.Content == null ? "" : await this.Context.Request.Content.ReadAsStringAsync().ConfigureAwait(false);
+        // Read the bytes as received, so the diagnostics show any BOM, non-UTF-8 charset or invalid UTF-8
+        // (ReadAsStringAsync would decode and normalise those away before T10 could see them).
+        var rawBytes = this.Context.Request.Content == null ? new byte[0] : await this.Context.Request.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+        var raw = Encoding.UTF8.GetString(rawBytes);
 
         var query = HttpUtility.ParseQueryString(this.Context.Request.RequestUri.Query);
         string target = null;
@@ -245,17 +254,18 @@ public class Script : ScriptBase
             ["authorizationHeader"] = platformReplacedAuth ? "Bearer *** (BGL header not visible)" : auth,
             ["headers"] = headers,
             ["rawBody"] = raw,
-            ["rawBodyBase64"] = Convert.ToBase64String(Encoding.UTF8.GetBytes(raw)),
+            ["rawBodyBase64"] = Convert.ToBase64String(rawBytes),
+            ["rawBodyByteLength"] = rawBytes.Length,
             ["rawBodyLength"] = raw.Length,
             ["verificationWithTestSecret"] = verification
         };
 
         if (string.IsNullOrEmpty(target))
             return Json(HttpStatusCode.OK, new JObject { ["message"] = "request accepted.", ["warning"] = "No target URL to forward to", ["diagnostics"] = diag });
-        // The target comes from the query string. It is not known whether the platform rejects a proxy URL
-        // whose query was edited, so never forward the BGL header and body anywhere but a flow trigger.
+        // The target comes from the query string, which anyone holding a proxy URL can edit (it is not known
+        // whether the platform rejects an edited one). Only forward to the pinned Flow B trigger.
         if (!IsAllowedTarget(target))
-            return Json(HttpStatusCode.BadRequest, new JObject { ["message"] = "missing required parameters", ["errors"] = new JArray("target is not an allowed trigger host") });
+            return Json(HttpStatusCode.BadRequest, new JObject { ["message"] = "missing required parameters", ["errors"] = new JArray("target does not match ProxyTargetPrefix") });
 
         var forward = new HttpRequestMessage(HttpMethod.Post, target) { Content = CreateJsonContent(diag.ToString()) };
         var fwd = await this.Context.SendAsync(forward, this.CancellationToken).ConfigureAwait(false);

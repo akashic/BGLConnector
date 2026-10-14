@@ -12,7 +12,7 @@ The repo is public. Keep all code, comments and docs **company- and project-agno
 
 ## Commands
 
-Everything is PowerShell 7 (`pwsh`), run from `bgl-spike/harness/`. There is no build step for the harness and no linter. The connector C# is checked by `Test-ConnectorCompile.ps1`. It wraps each `.csx` with Microsoft's supported `using` list and builds it against the stubs in `bgl-spike/compile-check/` (net472 reference assemblies, C# 7.3). The stubs for the undocumented `CreateNotificationUri`/`OriginalRequestUri` are inferred, so the proxy variant still needs a real deployment for T09.
+Everything is PowerShell 7 (`pwsh`), run from `bgl-spike/harness/`. There is no build step for the harness and no linter. The connector C# is checked by `Test-ConnectorCompile.ps1`. It wraps each `.csx` with Microsoft's supported `using` list and builds it against the stubs in `bgl-spike/compile-check/` (net472 reference assemblies, C# 7.3). The stubs for the undocumented `CreateNotificationUri`/`OriginalRequestUri` are inferred, so the proxy variant still needs a real deployment for T09. They're compiled only for the proxy variant (`PROXY_VARIANT`), so `script.csx` fails to build if it uses them.
 
 ```powershell
 ./Test-BglSignature.ps1        # T01: offline, no credentials. Exit 0 = pass.
@@ -23,7 +23,7 @@ Everything is PowerShell 7 (`pwsh`), run from `bgl-spike/harness/`. There is no 
 The other harness scripts call real BGL staging and need a BGL app client ID/secret plus an interactive browser consent. Don't run them unless the user asks:
 
 - `Get-BglToken.ps1 -ClientId <id> [-TestAllStyles] [-ManualCode]` (T02/T03/T05): Authorization Code flow on `127.0.0.1:8765`, then tries four token-request styles (`BglDocumented`, `FormBody`, `FormBodyWithScope`, `FormBodyBasicAuth`).
-- `Invoke-BglProbe.ps1 [-WriteTestContactId <id>] [-FinancialYear <yyyy>]` (T06/T13–T15): uses the saved token (refuses to run once it has expired) and about 15 calls against a 100-per-10-minutes limit. `Invoke-Probe` returns `{ Status, Json }`. Writes to Production are blocked unless `-AllowProductionWrite` is passed, and the write test asks for confirmation (`-Confirm:$false` skips it). The write test builds its PUT body from a whitelist of fields BGL documents for `PUT /sf/contacts/{id}` (`ConvertTo-BglContactUpdate`), then compares the *whole* record before and after (`Compare-BglRecord`). Never echo a GET record back: GET returns read-only fields and masks `tfn` as `Provided`. BGL doesn't document whether PUT clears omitted fields, so T13 needs a throwaway contact.
+- `Invoke-BglProbe.ps1 [-WriteTestContactId <id>] [-FinancialYear <yyyy>]` (T06/T13–T15): uses the saved token (refuses to run once it has expired) and about 15 calls against a 100-per-10-minutes limit. `Invoke-Probe` returns `{ Status, Json }`. Writes to Production are blocked unless `-AllowProductionWrite` is passed, and the write test asks for confirmation (`-Confirm:$false` skips it). The write test builds its PUT body from the fields BGL's PUT table allows for the contact's `contactType` (`ConvertTo-BglContactUpdate`), sends it as UTF-8 bytes, then compares the *whole* record before and after, ignoring `entityRelationships` order (`Compare-BglRecord`). Date filters are sent as `yyyy-MM-dd'T'HH:mm:ss'Z'`. BGL documents that format for `updatedAfter`; for `modifiedAfter` it says only "UTC Time", so the same format is assumed. The PUT body maps full state names to codes and reformats dates to PUT's formats. `Compare-BglRecord` reports each changed field with before and after values, and flags an `address.addressId`-only change as harmless. Never echo a GET record back: GET returns read-only fields and masks `tfn` as `Provided`. BGL doesn't document whether PUT clears omitted fields, so T13 needs a throwaway contact.
 - `Send-BglTestWebhook.ps1 -Url <url> -Secret spike-test-secret -ClientCode spike [-Tamper All]`: webhook simulator.
 
 Connector deployment (`pac connector create/update` with the three `connector/` files) is in README Part B.
@@ -38,11 +38,11 @@ There are two independent implementations of the same BGL logic. They have to ag
   - `apiProperties.json` holds the generic `oauth2` provider settings. `clientId` is the placeholder `REPLACE_WITH_BGL_CLIENT_ID`. `scriptOperations` lists the operations routed to code.
   - `script.csx` (core, documented APIs only) and `script-with-proxy.csx` (core plus the undocumented `Context.CreateNotificationUri` / `OriginalRequestUri`, copied from the DocuSign and Zellis certified connectors). The proxy file is a superset of the core one, so **core changes must be made in both files**.
 
-Cross-file invariants (`Test-ConnectorSync.ps1` checks the first and the shared-block rule):
+Cross-file invariants (`Test-ConnectorSync.ps1` checks the first two, and that the deploy-time constants `ProxyTargetPrefix`/`SpikeTestSecret` are empty unless `-AllowDeployValues` is passed. It also checks that every `/spike/*` operation is in `scriptOperations`. A missing one makes the platform forward that call, with its secret and the user's BGL token, to BGL instead of running the code):
 
 - The swagger `operationId`, the `scriptOperations` entry in `apiProperties.json`, and `KnownOperations` plus the `switch` in **both** `.csx` files.
 - Everything between `// ===== BEGIN SHARED` and `// ===== END SHARED =====` must be identical in both `.csx` files. Put proxy-only code outside that block.
-- The proxy only forwards to https hosts ending `.logic.azure.com` or `.api.powerplatform.com` (`IsAllowedTarget`), because the target URL comes from the query string.
+- The proxy only forwards to a target with the same host and path as the `ProxyTargetPrefix` constant (`IsAllowedTarget`), which must be set to Flow B's trigger URL before deploying. A host allow-list is not enough, because `*.logic.azure.com` and `*.api.powerplatform.com` are shared by every tenant.
 - The signature algorithm in `BglSpike.psm1` (`Get-BglSignature` / `Test-BglAuthorizationHeader`) and in the `.csx` (`ComputeSignature` / `Verify`). Both are checked against BGL's published worked example: T01 in the harness and `SpikeSelfTest` in the connector. If you change one, the shared test vector must still pass in both.
 
 ## BGL webhook signature facts that are easy to break
