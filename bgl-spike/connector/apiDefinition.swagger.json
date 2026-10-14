@@ -111,7 +111,8 @@
             "required": true,
             "type": "string",
             "description": "BGL fund/entity ID",
-            "x-ms-summary": "Fund ID"
+            "x-ms-summary": "Fund ID",
+            "x-ms-url-encoding": "single"
           }
         ],
         "responses": {
@@ -204,7 +205,8 @@
             "required": true,
             "type": "string",
             "description": "BGL fund/entity ID",
-            "x-ms-summary": "Fund ID"
+            "x-ms-summary": "Fund ID",
+            "x-ms-url-encoding": "single"
           },
           {
             "name": "tag",
