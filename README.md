@@ -54,6 +54,7 @@ Every test has an ID from **T01 to T15**. Each records a result in the test matr
 ├── CLAUDE.md                  Guidance for AI coding agents working in this repo
 ├── .github/workflows/         CI: runs the offline checks on every push and pull request
 ├── docs/
+│   ├── guides/                Reusable guides, e.g. testing a custom connector with paconn
 │   ├── journal/               Dated session notes
 │   └── lessons/               Lessons learned; taxonomy.yml defines the allowed tags
 └── bgl-spike/
@@ -80,7 +81,7 @@ Every test has an ID from **T01 to T15**. Each records a result in the test matr
 
 3. Follow the runbook's three parts in order:
    - **Part A**: the harness against BGL staging.
-   - **Part B**: deploy the spike connector.
+   - **Part B**: deploy the spike connector. To check the connector definition with Power Platform's validator first, see [Testing a custom connector with paconn](docs/guides/paconn-connector-testing.md). `pac`, which the runbook deploys with, has no validate command.
    - **Part C**: build the test flows.
 
 ## Security notes
@@ -92,6 +93,7 @@ Every test has an ID from **T01 to T15**. Each records a result in the test matr
 
 ## References
 
+- [Testing a custom connector with paconn](docs/guides/paconn-connector-testing.md): validating, deploying and testing a custom connector definition
 - BGL API documentation: [docs.api.bgl360.com.au](https://docs.api.bgl360.com.au/) and its Postman collection at [github.com/BGLCorp/bgl-api-doc](https://github.com/BGLCorp/bgl-api-doc)
 - Microsoft: [Write code in a custom connector](https://learn.microsoft.com/connectors/custom-connectors/write-code)
 - Microsoft: [Secure data used in cloud flows](https://learn.microsoft.com/power-automate/guidance/coding-guidelines/use-secure-inputs-outputs-triggers)
