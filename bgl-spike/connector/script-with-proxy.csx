@@ -31,6 +31,8 @@ public class Script : ScriptBase
         }
         catch (Exception ex)
         {
+            // Spike only: returns the exception type and message to the caller to make failures easy to
+            // diagnose. A production connector should log the detail and return a generic error.
             this.Context.Logger.LogError($"Spike error: {ex.GetType().Name}: {ex.Message}");
             return Json(HttpStatusCode.InternalServerError, new JObject
             {
@@ -41,6 +43,7 @@ public class Script : ScriptBase
         }
     }
 
+    // ===== BEGIN SHARED: keep identical in script.csx and script-with-proxy.csx (checked by Test-ConnectorSync.ps1) =====
     // Some certified connectors defensively decode OperationId in case it arrives Base64-encoded.
     private string GetOperationId()
     {
@@ -158,6 +161,18 @@ public class Script : ScriptBase
         response.Content = CreateJsonContent(body.ToString());
         return response;
     }
+    // ===== END SHARED =====
+
+    // Host suffixes used by Power Automate and Logic Apps HTTP trigger URLs.
+    private static readonly string[] AllowedTargetHostSuffixes = { ".logic.azure.com", ".api.powerplatform.com" };
+
+    private static bool IsAllowedTarget(string target)
+    {
+        Uri uri;
+        if (!Uri.TryCreate(target, UriKind.Absolute, out uri) || uri.Scheme != Uri.UriSchemeHttps) return false;
+        var host = uri.Host.ToLowerInvariant();
+        return AllowedTargetHostSuffixes.Any(s => host.EndsWith(s, StringComparison.Ordinal));
+    }
 
     // ---------- T09: can an ACTION create a notification proxy URL? ----------
     // Uses Context.CreateNotificationUri, as the DocuSign certified connector does for triggers.
@@ -167,6 +182,8 @@ public class Script : ScriptBase
         var target = (string)input["targetUrl"];
         if (string.IsNullOrEmpty(target))
             return Json(HttpStatusCode.BadRequest, new JObject { ["message"] = "targetUrl is required" });
+        if (!IsAllowedTarget(target))
+            return Json(HttpStatusCode.BadRequest, new JObject { ["message"] = "targetUrl must be an https Power Automate or Logic Apps trigger URL" });
 
         var encoded = Uri.EscapeDataString(Convert.ToBase64String(Encoding.UTF8.GetBytes(target)));
         var proxy = this.Context.CreateNotificationUri($"/spike/webhook?target={encoded}");
@@ -235,6 +252,10 @@ public class Script : ScriptBase
 
         if (string.IsNullOrEmpty(target))
             return Json(HttpStatusCode.OK, new JObject { ["message"] = "request accepted.", ["warning"] = "No target URL to forward to", ["diagnostics"] = diag });
+        // The target comes from the query string. It is not known whether the platform rejects a proxy URL
+        // whose query was edited, so never forward the BGL header and body anywhere but a flow trigger.
+        if (!IsAllowedTarget(target))
+            return Json(HttpStatusCode.BadRequest, new JObject { ["message"] = "missing required parameters", ["errors"] = new JArray("target is not an allowed trigger host") });
 
         var forward = new HttpRequestMessage(HttpMethod.Post, target) { Content = CreateJsonContent(diag.ToString()) };
         var fwd = await this.Context.SendAsync(forward, this.CancellationToken).ConfigureAwait(false);

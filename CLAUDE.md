@@ -6,22 +6,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A time-boxed **spike**, not a product. It answers one question: what can Power Platform do natively with the BGL SF360 API (OAuth, API calls, webhook signature verification), and what needs Azure (APIM / Functions) in front of it? Every test has an ID **T01–T15**. Code comments, script synopses and the README's test matrix all use these IDs, so keep them when adding or changing tests.
 
-`bgl-spike/README.md` is the source of truth: run order, test matrix, decision guide and open questions for BGL.
+`bgl-spike/README.md` is the source of truth: run order, test matrix, decision guide and open questions for BGL. The root `README.md` is a short overview that links to it; keep detail in the runbook, not the overview.
 
 The repo is public. Keep all code, comments and docs **company- and project-agnostic**: no client or employer names, no organisation-specific plans or integration direction, no initials as sample values (the simulator's sample client code is `spike`).
 
 ## Commands
 
-Everything is PowerShell 7 (`pwsh`), run from `bgl-spike/harness/`. There is no build step and no linter.
+Everything is PowerShell 7 (`pwsh`), run from `bgl-spike/harness/`. There is no build step for the harness and no linter. The connector C# is checked by `Test-ConnectorCompile.ps1`. It wraps each `.csx` with Microsoft's supported `using` list and builds it against the stubs in `bgl-spike/compile-check/` (net472 reference assemblies, C# 7.3). The stubs for the undocumented `CreateNotificationUri`/`OriginalRequestUri` are inferred, so the proxy variant still needs a real deployment for T09.
 
 ```powershell
-./Test-BglSignature.ps1        # T01: offline, no credentials. Exit 0 = pass. This is the only self-contained test.
+./Test-BglSignature.ps1        # T01: offline, no credentials. Exit 0 = pass.
+./Test-ConnectorSync.ps1       # Offline: shared .csx code and operation lists agree. Run after any connector edit.
+./Test-ConnectorCompile.ps1    # Compiles both .csx files (needs the .NET SDK). Run after any connector edit.
 ```
 
 The other harness scripts call real BGL staging and need a BGL app client ID/secret plus an interactive browser consent. Don't run them unless the user asks:
 
 - `Get-BglToken.ps1 -ClientId <id> [-TestAllStyles] [-ManualCode]` (T02/T03/T05): Authorization Code flow on `127.0.0.1:8765`, then tries four token-request styles (`BglDocumented`, `FormBody`, `FormBodyWithScope`, `FormBodyBasicAuth`).
-- `Invoke-BglProbe.ps1 [-WriteTestContactId <id>] [-FinancialYear <yyyy>]` (T06/T13–T15): uses the saved token (refuses to run once it has expired) and about 15 calls against a 100-per-10-minutes limit. Writes to Production are blocked unless `-AllowProductionWrite` is passed. The write test builds its PUT body from a whitelist of fields BGL documents for `PUT /sf/contacts/{id}` (`ConvertTo-BglContactUpdate`). Never echo a GET record back: GET returns read-only fields and masks `tfn` as `Provided`.
+- `Invoke-BglProbe.ps1 [-WriteTestContactId <id>] [-FinancialYear <yyyy>]` (T06/T13–T15): uses the saved token (refuses to run once it has expired) and about 15 calls against a 100-per-10-minutes limit. `Invoke-Probe` returns `{ Status, Json }`. Writes to Production are blocked unless `-AllowProductionWrite` is passed, and the write test asks for confirmation (`-Confirm:$false` skips it). The write test builds its PUT body from a whitelist of fields BGL documents for `PUT /sf/contacts/{id}` (`ConvertTo-BglContactUpdate`), then compares the *whole* record before and after (`Compare-BglRecord`). Never echo a GET record back: GET returns read-only fields and masks `tfn` as `Provided`. BGL doesn't document whether PUT clears omitted fields, so T13 needs a throwaway contact.
 - `Send-BglTestWebhook.ps1 -Url <url> -Secret spike-test-secret -ClientCode spike [-Tamper All]`: webhook simulator.
 
 Connector deployment (`pac connector create/update` with the three `connector/` files) is in README Part B.
@@ -36,9 +38,11 @@ There are two independent implementations of the same BGL logic. They have to ag
   - `apiProperties.json` holds the generic `oauth2` provider settings. `clientId` is the placeholder `REPLACE_WITH_BGL_CLIENT_ID`. `scriptOperations` lists the operations routed to code.
   - `script.csx` (core, documented APIs only) and `script-with-proxy.csx` (core plus the undocumented `Context.CreateNotificationUri` / `OriginalRequestUri`, copied from the DocuSign and Zellis certified connectors). The proxy file is a superset of the core one, so **core changes must be made in both files**.
 
-Cross-file invariants to keep in sync when adding or renaming a code-handled operation:
+Cross-file invariants (`Test-ConnectorSync.ps1` checks the first and the shared-block rule):
 
 - The swagger `operationId`, the `scriptOperations` entry in `apiProperties.json`, and `KnownOperations` plus the `switch` in **both** `.csx` files.
+- Everything between `// ===== BEGIN SHARED` and `// ===== END SHARED =====` must be identical in both `.csx` files. Put proxy-only code outside that block.
+- The proxy only forwards to https hosts ending `.logic.azure.com` or `.api.powerplatform.com` (`IsAllowedTarget`), because the target URL comes from the query string.
 - The signature algorithm in `BglSpike.psm1` (`Get-BglSignature` / `Test-BglAuthorizationHeader`) and in the `.csx` (`ComputeSignature` / `Verify`). Both are checked against BGL's published worked example: T01 in the harness and `SpikeSelfTest` in the connector. If you change one, the shared test vector must still pass in both.
 
 ## BGL webhook signature facts that are easy to break
@@ -46,6 +50,7 @@ Cross-file invariants to keep in sync when adding or renaming a code-handled ope
 - Header: `{clientCode} {UTC timestamp yyyy-MM-ddTHH:mm:ss.fffZ} {Base64 HMAC-SHA256(secret, timestamp + "POST" + fullUrl + rawBody)}`. The client code is lowercased. Both implementations trim the header and split on single spaces only (tabs or double spaces are rejected), and T01 checks that.
 - The signature covers the **exact raw body bytes** and the **full URL including its query string**, such as the `sig=` on a Power Automate trigger URL. Re-serialising JSON, or verifying against a URL without its query string, will fail verification. T01 deliberately tests both cases.
 - Comparisons are constant-time. There is a ±300 s timestamp skew window (`MaxSkewSeconds`, 0 disables it). There is no replay protection: a captured header and body verify again within that window, so a real receiver must deduplicate on `eventId`.
+- Flow run history shows action inputs and outputs. Anything carrying the real secret, the BGL header or the trigger URL needs Secure inputs/outputs, and the real secret belongs in a Key Vault-backed environment variable (README Part C).
 - Redact `sig=` in anything logged or returned (`RedactSig`). Never put a real BGL secret in connector code. `SpikeTestSecret` in `script-with-proxy.csx` must stay empty except for simulator runs.
 
 ## BGL API constraints that drive the design

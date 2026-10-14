@@ -1,2 +1,5 @@
 .secrets/
 results/*.json
+compile-check/bin/
+compile-check/obj/
+compile-check/generated/

@@ -35,6 +35,8 @@ public class Script : ScriptBase
         }
         catch (Exception ex)
         {
+            // Spike only: returns the exception type and message to the caller to make failures easy to
+            // diagnose. A production connector should log the detail and return a generic error.
             this.Context.Logger.LogError($"Spike error: {ex.GetType().Name}: {ex.Message}");
             return Json(HttpStatusCode.InternalServerError, new JObject
             {
@@ -45,6 +47,7 @@ public class Script : ScriptBase
         }
     }
 
+    // ===== BEGIN SHARED: keep identical in script.csx and script-with-proxy.csx (checked by Test-ConnectorSync.ps1) =====
     // Some certified connectors defensively decode OperationId in case it arrives Base64-encoded.
     private string GetOperationId()
     {
@@ -162,5 +165,6 @@ public class Script : ScriptBase
         response.Content = CreateJsonContent(body.ToString());
         return response;
     }
+    // ===== END SHARED =====
 
 }

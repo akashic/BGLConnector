@@ -106,15 +106,28 @@ function Get-BglBasicAuthHeader {
     'Basic ' + [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("$($ClientId):$($ClientSecret)"))
 }
 
+# Owner-only permissions on macOS/Linux (Windows user-profile ACLs already restrict access).
+function Set-OwnerOnlyPermission {
+    param([Parameter(Mandatory)][string]$Path, [switch]$Directory)
+    if ($IsWindows) { return }
+    $mode = if ($Directory) { 'UserRead, UserWrite, UserExecute' } else { 'UserRead, UserWrite' }
+    try { [System.IO.File]::SetUnixFileMode($Path, [System.IO.UnixFileMode]$mode) }   # .NET 7+ (PowerShell 7.3+)
+    catch { chmod $(if ($Directory) { '700' } else { '600' }) $Path }
+}
+
 function Get-SpikeSecretsPath {
     $dir = Join-Path (Split-Path $PSScriptRoot -Parent) '.secrets'
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
+    Set-OwnerOnlyPermission -Path $dir -Directory
     $dir
 }
 
 function Save-BglToken {
     param([Parameter(Mandatory)]$Token, [Parameter(Mandatory)][string]$Environment)
     $path = Join-Path (Get-SpikeSecretsPath) "bgl-token-$($Environment.ToLowerInvariant()).json"
+    # Restrict the file before the token is written into it.
+    if (-not (Test-Path $path)) { New-Item -ItemType File -Path $path | Out-Null }
+    Set-OwnerOnlyPermission -Path $path
     $Token | ConvertTo-Json -Depth 5 | Set-Content -Path $path -Encoding utf8
     Write-Warning "Token saved in plain text to $path - spike use only. Delete it when finished."
     $path

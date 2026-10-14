@@ -38,10 +38,10 @@ Relevant scopes: `smsf_partner` (SF360 entities, documents, establishment and co
 
 1. **BGL staging access and an app.** Email api@bglcorp.com.au, then create an app in the [staging Developer Portal](https://developer.staging.bgl360.com.au/d/). Note the client ID, client secret and granted scopes.
 2. **Redirect URL on the BGL app:** `http://127.0.0.1:8765/callback`. Add the connector's redirect URL later (step C3).
-3. **PowerShell 7** (`pwsh`). Mac: `brew install --cask powershell`. Windows: `winget install Microsoft.PowerShell`. On an IT-managed machine you may need IT to install it.
+3. **PowerShell 7** (`pwsh`), and the **.NET SDK** for the connector compile check (Mac: `brew install dotnet`; Windows: `winget install Microsoft.DotNet.SDK.8`). Mac: `brew install --cask powershell`. Windows: `winget install Microsoft.PowerShell`. On an IT-managed machine you may need IT to install it.
 4. **A dev Power Platform environment** where you can create custom connectors and flows, plus `pac` CLI (optional; you can import through the portal instead).
 
-Secrets never go into the repo. The harness writes tokens to `.secrets/` and results to `results/`, and both are git-ignored. Delete `.secrets/` when you finish.
+Secrets never go into the repo. The harness writes tokens to `.secrets/` (owner-only permissions on macOS and Linux) and results to `results/`, and both are git-ignored. Delete `.secrets/` when you finish.
 
 ---
 
@@ -55,6 +55,13 @@ cd harness
 # T01 - offline: the harness HMAC matches BGL's worked example
 ./Test-BglSignature.ps1
 
+# Offline: the two connector scripts and the connector definition are in sync (run after any connector edit)
+./Test-ConnectorSync.ps1
+
+# Both connector scripts compile against Microsoft's documented supporting classes (needs the .NET SDK;
+#   the first run downloads NuGet packages). Run after any connector edit.
+./Test-ConnectorCompile.ps1
+
 # T02, T03, T05 - authorize, try all four token request styles, test refresh behaviour
 ./Get-BglToken.ps1 -ClientId '<client id>' -Scope smsf_partner -TestAllStyles
 #   You'll authorise once per style; after the first consent BGL should redirect immediately.
@@ -66,8 +73,9 @@ cd harness
 #   Workpapers use the current Australian financial year (ending 30 June); override with -FinancialYear.
 ./Invoke-BglProbe.ps1
 
-# T13 - idempotent write test on STAGING (reads a contact, PUTs the documented fields back unchanged;
-#   skipped unless the read returns HTTP 200 with that contact)
+# T13 - idempotent write test on STAGING. Use a THROWAWAY contact: BGL doesn't document whether PUT
+#   clears fields it isn't sent (tfn, entity relationships). The script asks for confirmation, PUTs the
+#   documented fields back unchanged, then compares the whole record and lists any field that changed.
 ./Invoke-BglProbe.ps1 -WriteTestContactId '<staging contact id>'
 ```
 
@@ -97,15 +105,20 @@ Portal alternative: Custom connectors → New → Import an OpenAPI file. Then o
 pac connector update --connector-id <id> --script-file ./connector/script-with-proxy.csx
 ```
 
-If the save or compile fails, record that as the T09 result; it means the undocumented `CreateNotificationUri` isn't available to custom connectors in your tenant. Then switch back to `script.csx`.
+If the save or compile fails, record that as the T09 result. Because `Test-ConnectorCompile.ps1` has already ruled out syntax and type errors, a failure here means the undocumented `CreateNotificationUri` or `OriginalRequestUri` isn't available to custom connectors in your tenant. Then switch back to `script.csx`.
 
 ### Part C: test flows
 
 Build both flows in the dev environment and delete them afterwards. An anonymous HTTP trigger may be blocked by your DLP policy; that itself is a finding.
 
+**Run history is readable by anyone with access to the flow.** It shows action inputs and outputs, including the shared secret, the BGL `Authorization` header and the trigger URL. The trigger URL (with its `sig`) is itself a credential, and a captured header and body can be replayed within the 300-second window. For simulator runs with `spike-test-secret` that's acceptable and useful for diagnosis. Before any real BGL traffic (T12):
+
+- turn on **Secure inputs** for the *Validate BGL signature* action, and **Secure outputs** for the trigger and the `Headers`/`BodyAsString` Compose actions (action **Settings → Security**);
+- keep the real secret in an environment variable of type **Secret** backed by Azure Key Vault, read it with the Dataverse *Perform an unbound action* → `RetrieveEnvironmentVariableSecretValue` action (with **Secure outputs** on), and pass that output to the validation action. Secret environment variables aren't offered in the dynamic content picker.
+
 **Flow A — "BGL Spike – Inspector"** (T08, T11, T12)
 
-1. Trigger: *When an HTTP request is received*. Who can trigger: Anyone (spike only). No JSON schema.
+1. Trigger: *When an HTTP request is received*. Who can trigger: **Anyone** (spike only). New triggers default to *Any user in my tenant*, which rejects BGL because it can't send an Entra ID token. No JSON schema.
 2. Save, copy the trigger URL, and store it in an environment variable `bgl_spike_trigger_url`. The signature covers the *full* URL, including the `sig` query string.
 3. Compose `Headers` = `triggerOutputs()?['headers']`
 4. Compose `BodyAsString` = `string(triggerBody())`
@@ -113,14 +126,14 @@ Build both flows in the dev environment and delete them afterwards. An anonymous
    - Authorization header: `triggerOutputs()?['headers']?['Authorization']`
    - URL BGL called: the `bgl_spike_trigger_url` variable
    - Raw body: output of `BodyAsString`
-   - Shared secret: `spike-test-secret` (simulator) or the real BGL secret (T12)
+   - Shared secret: `spike-test-secret` (simulator), or for T12 the real BGL secret from the Key Vault-backed environment variable (see above)
    - Expected client code: `spike` for the simulator, or the client code BGL assigns
 6. Response: 200 `{"message":"request accepted."}` if `isValid` is true, otherwise 401.
 
 **Flow B — "BGL Spike – Proxy target"** (T09, T10)
 
 1. Trigger: *When an HTTP request is received*. Copy its URL.
-2. Manual flow (run once): call **Create notification proxy URL** with targetUrl = Flow B's URL. Record the returned `proxyUrl`.
+2. Manual flow (run once): call **Create notification proxy URL** with targetUrl = Flow B's URL. Record the returned `proxyUrl`. The code only accepts https targets on `*.logic.azure.com` or `*.api.powerplatform.com` (Power Automate and Logic Apps trigger hosts), so the proxy can't be pointed at an arbitrary URL.
 3. In Flow B, after the trigger:
    - Compose `Diagnostics` = `triggerBody()`
    - **Validate BGL signature** with:
@@ -142,7 +155,11 @@ Send simulator traffic:
 
 For T10 you can also put `spike-test-secret` in the `SpikeTestSecret` constant in `script-with-proxy.csx`. The receiver then tries both URLs it can see and reports which one makes the signature verify. Clear the constant afterwards.
 
+Also for T10, check whether the platform protects the proxy URL's query string. Edit the `target` parameter in `proxyUrl`, for example by base64-encoding Flow A's trigger URL instead of Flow B's, and send simulator traffic to it. If the message reaches Flow A, the platform does not sign the query and the host allow-list in the code is the only thing stopping redirection. Record that either way.
+
 **T12 (real BGL traffic):** register Flow A's trigger URL (or the proxy URL, if T10 passed) against the **Audit** message type in the staging Developer Portal. Wait for BGL approval, then use *Send to Audit* on a staging fund in SF360.
+
+BGL signs the exact URL it calls, so the registered URL and the `bgl_spike_trigger_url` variable must match character for character. Power Automate trigger URLs aren't stable: Microsoft moved them to a new format (old URLs stopped working on 30 November 2025) and from June 2026 can include a scale-unit segment (`/direct/cu/<n>/workflows/...`). They can also be longer than 255 characters, so check that the BGL portal accepts the full URL. Whenever the trigger URL changes, update both the BGL registration and the variable. This fragility is another argument for a fixed receiver (see Decision guide).
 
 ---
 
@@ -154,15 +171,15 @@ For T10 you can also put `spike-test-secret` in the `SpikeTestSecret` constant i
 | T02 | Do authorize and the 127.0.0.1 redirect work in staging? Is the staging authorize URL right? | `Get-BglToken.ps1` | Code received. If not, record the correct URL from BGL. | |
 | T03 | Which token request styles does BGL accept? | `Get-BglToken.ps1 -TestAllStyles` | Record each style. **Key question: does `FormBody` succeed?** | |
 | T04 | Does Power Platform's generic OAuth 2.0 provider work with BGL? | Create a connection (C4), run *Get user details* | Connection is created and the action returns 200 | |
-| T05 | Does BGL rotate refresh tokens? Does reusing an old one revoke the new one? | `Get-BglToken.ps1` refresh section | Record rotated, reusable, current-still-valid | |
+| T05 | Does BGL rotate refresh tokens? Does reusing an old one revoke the new one? Does refreshing extend the refresh token's 30-day expiry? | `Get-BglToken.ps1` refresh section | Record rotated, reusable, current-still-valid, `RefreshExpiryExtended` and `is_new_token` | |
 | T06 | Which endpoints does the granted scope reach? | `Invoke-BglProbe.ps1` | 200 vs 401/403 per endpoint | |
 | T07 | Does HMAC-SHA256 run in the custom code sandbox? | *Spike: signature self-test* action | `pass: true` | |
 | T08 | Can a flow verify a signature through the connector action? | Simulator → Flow A | Valid message accepted; all tamper cases rejected | |
 | T09 | Can an action create a notification proxy URL? | Proxy variant → *Create notification proxy URL* | Returns `proxyUrl` (or record the save/compile error) | |
-| T10 | Does a proxied webhook keep its Authorization header, body and a verifiable URL? | Simulator → proxyUrl → Flow B | Header not replaced, body intact, signature verifies against a known URL | |
+| T10 | Does a proxied webhook keep its Authorization header, body and a verifiable URL? Does the platform reject an edited proxy URL? | Simulator → proxyUrl → Flow B, then the edited-`target` check | Header not replaced, body intact, signature verifies against a known URL; record whether the edited URL was rejected | |
 | T11 | Does `string(triggerBody())` keep the exact bytes BGL signed? | Simulator → Flow A, compare `isValid` | Verifies. If not, raw-body fidelity rules out this design. | |
 | T12 | What does a real BGL Audit webhook look like? Can owner apps register one? | Portal registration and *Send to Audit* | Message received and verified with the real secret | |
-| T13 | Can client details be written with the granted scope? | Probe `-WriteTestContactId` (staging) | PUT returns 2xx and the record is unchanged | |
+| T13 | Can client details be written with the granted scope? | Probe `-WriteTestContactId` (throwaway staging contact) | PUT returns 2xx and no field changed (the script lists any that did) | |
 | T14 | Is polling feasible for SF360 changes? | Probe date fields, lodgements `modifiedAfter` | Record which endpoints expose usable change dates or filters | |
 | T15 | What are the actual rate limits for the app? | Probe P03 and the headers | Record the 10-minute and daily limits | |
 
@@ -175,7 +192,10 @@ For T10 you can also put `spike-test-secret` in the `SpikeTestSecret` constant i
 - Point the connector's token URL at an **APIM endpoint** that rewrites the form body into BGL's query string plus Basic header.
 - Have an **Azure Function own the BGL token** (refresh token in Key Vault), with the connector calling the Function using Entra ID.
 
-**If T04 passes,** native connectors work for API calls. Add a weekly keep-alive flow that calls *Get rate limit status*. It's free against the rate limit, and it stops the connection from going 30 days unused, after which the refresh token expires.
+**If T04 passes,** native connectors work for API calls. Whether a keep-alive helps depends on T05:
+
+- If refreshing extends the refresh token's expiry (`RefreshExpiryExtended` is true), add a weekly keep-alive flow that calls *Get rate limit status*. It's free against the rate limit, and each weekly call triggers a refresh once the 7-day access token has expired, which pushes the 30-day expiry out.
+- If the expiry is fixed from first consent, no keep-alive can save the connection: someone has to re-authorise it at least every 30 days, or a token-owning service (below) has to handle it.
 
 **Webhooks:** registration is a fixed URL per message type, so a **fixed receiver** is needed:
 
@@ -208,9 +228,14 @@ For T10 you can also put `spike-test-secret` in the `SpikeTestSecret` constant i
 | `harness/Get-BglToken.ps1` | T02, T03, T05 OAuth and token style tests |
 | `harness/Invoke-BglProbe.ps1` | T06, T13, T14, T15 API probe |
 | `harness/Send-BglTestWebhook.ps1` | Webhook simulator with tamper suite |
+| `harness/Test-ConnectorSync.ps1` | Offline check that the two scripts' shared code and the connector's operation lists agree |
+| `harness/Test-ConnectorCompile.ps1` | Compiles both connector scripts locally using `compile-check/` |
+| `compile-check/` | .NET project and Microsoft's documented `ScriptBase`/`IScriptContext` stubs used by the compile check |
 | `connector/apiDefinition.swagger.json` | Spike connector definition (staging host) |
 | `connector/apiProperties.json` | OAuth settings and the operations handled by code |
 | `connector/script.csx` | Core custom code, documented APIs only |
 | `connector/script-with-proxy.csx` | Core plus the DocuSign/Zellis notification proxy pattern |
+
+The connector's error handler returns the exception type and message to the caller so spike failures are easy to diagnose. A production connector should log the detail and return a generic error.
 
 **Cleanup:** delete `.secrets/`, the two test flows, the spike connector and its connections, and remove the test webhook registrations from the BGL portal.

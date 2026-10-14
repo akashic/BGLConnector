@@ -137,13 +137,21 @@ function Invoke-TokenRequest {
     $r = Invoke-WebRequest -Method Post -Uri $uri -Headers $headers -Body $body -ContentType $contentType -SkipHttpErrorCheck
     $sw.Stop()
     $json = $null; try { $json = $r.Content | ConvertFrom-Json } catch { }
+    $status = [int]$r.StatusCode
+    $errorText = if ($json.error) { "$($json.error): $($json.error_description)" }
+             elseif ($status -ne 200) { $text = "$($r.Content)"; $text.Substring(0, [math]::Min(300, $text.Length)) }
     [pscustomobject]@{
         Style      = $Style
         GrantType  = $Grant.grant_type
-        StatusCode = [int]$r.StatusCode
-        Success    = ([int]$r.StatusCode -eq 200 -and $json.access_token)
+        StatusCode = $status
+        Success    = ($status -eq 200 -and $json.access_token)
         Ms         = $sw.ElapsedMilliseconds
-        Error      = if ($json.error) { "$($json.error): $($json.error_description)" } elseif ([int]$r.StatusCode -ne 200) { ($r.Content | Out-String).Substring(0, [math]::Min(300, ($r.Content | Out-String).Length)) } else { $null }
+        Error      = $errorText
+        # BGL returns these alongside the token. is_new_token = false would mean BGL handed back an existing
+        # token rather than issuing one, which changes how T03/T05 results should be read.
+        IsNewToken            = $json.is_new_token
+        AccessTokenExpiresAt  = $json.access_token_expires_at
+        RefreshTokenExpiresAt = $json.refresh_token_expires_at
         Token      = $json
     }
 }
@@ -169,8 +177,17 @@ if ($goodToken -and -not $SkipRefreshTest) {
     foreach ($s in $styles) {
         $r = Invoke-TokenRequest -Style $s -Grant @{ grant_type = 'refresh_token'; refresh_token = $currentRefresh }
         $rotated = [bool]($r.Success -and $r.Token.refresh_token -and ($r.Token.refresh_token -ne $currentRefresh))
-        $refreshResults += [pscustomobject]@{ Test = 'refresh'; Style = $s; StatusCode = $r.StatusCode; Success = [bool]$r.Success; RefreshTokenRotated = $rotated; Error = $r.Error }
-        Write-Host ("{0}  HTTP {1}  rotated={2}  {3}" -f ($(if ($r.Success) { 'SUCCESS' } else { 'FAILED ' })), $r.StatusCode, $rotated, $r.Error)
+        # Does refreshing push the refresh token's expiry out (sliding), or is the 30 days fixed from first
+        # consent? A keep-alive flow only helps if it slides.
+        $expiryBefore = $goodToken.refresh_token_expires_at
+        $expiryAfter = $r.Token.refresh_token_expires_at
+        $extended = if ($r.Success -and $expiryBefore -and $expiryAfter) { [long]$expiryAfter -gt [long]$expiryBefore }
+        $refreshResults += [pscustomobject]@{
+            Test = 'refresh'; Style = $s; StatusCode = $r.StatusCode; Success = [bool]$r.Success; RefreshTokenRotated = $rotated
+            RefreshExpiryBefore = $expiryBefore; RefreshExpiryAfter = $expiryAfter; RefreshExpiryExtended = $extended
+            IsNewToken = $r.IsNewToken; Error = $r.Error
+        }
+        Write-Host ("{0}  HTTP {1}  rotated={2}  expiryExtended={3}  {4}" -f ($(if ($r.Success) { 'SUCCESS' } else { 'FAILED ' })), $r.StatusCode, $rotated, $extended, $r.Error)
         if ($r.Success) {
             $goodToken = $r.Token; $workingStyle = $s
             if ($rotated) { $previousRefresh = $currentRefresh; $currentRefresh = $r.Token.refresh_token }
@@ -195,10 +212,11 @@ $summary = [ordered]@{
     authorizeUrl       = $envCfg.AuthorizeUrl
     tokenUrl           = $envCfg.TokenUrl
     requestedScope     = $Scope
-    exchangeResults    = $results | Select-Object Style, StatusCode, Success, Ms, Error
+    exchangeResults    = $results | Select-Object Style, StatusCode, Success, Ms, IsNewToken, AccessTokenExpiresAt, RefreshTokenExpiresAt, Error
     refreshResults     = $refreshResults
     grantedScope       = $goodToken.scope
     expiresInSeconds   = $goodToken.expires_in
+    refreshTokenExpiresAt = $goodToken.refresh_token_expires_at
     bglFirmId          = $goodToken.bgl_firm_id
     authorizedUsername = $goodToken.username
     tokenFieldNames    = if ($goodToken) { $goodToken.PSObject.Properties.Name } else { @() }

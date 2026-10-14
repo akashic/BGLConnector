@@ -12,14 +12,19 @@
   values back, limited to the fields BGL documents for PUT /sf/contacts/{id}. Read-only and masked
   GET fields (contactId, contactType, entityRelationships, addressId, and tfn, which GET returns as
   'Provided'/'Not Provided') are never sent. 401/403 = scope problem; 400 = request shape problem.
-  The write is skipped unless the read returned HTTP 200 with the requested contact.
+  The write is skipped unless the read returned HTTP 200 with the requested contact, and it asks
+  for confirmation (pass -Confirm:$false to skip the prompt).
+
+  BGL does not document whether PUT leaves omitted fields alone or clears them, so use a throwaway
+  staging contact. The whole record is compared before and after, and any changed field (including
+  tfn going from 'Provided' to 'Not Provided') is reported.
 
 .EXAMPLE
   ./Invoke-BglProbe.ps1
 .EXAMPLE
   ./Invoke-BglProbe.ps1 -FundId 8ad08a06... -WriteTestContactId 8ad0...
 #>
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
 param(
     [ValidateSet('Staging', 'Production')][string]$Environment = 'Staging',
     [string]$FundId,
@@ -69,21 +74,23 @@ function Invoke-Probe {
     if ($Body) { $params.Body = ($Body | ConvertTo-Json -Depth 10 -Compress); $params.ContentType = 'application/json' }
     $r = Invoke-WebRequest @params
     $sw.Stop()
+    $status = [int]$r.StatusCode
     $json = $null; try { $json = $r.Content | ConvertFrom-Json -Depth 20 -NoEnumerate } catch { }
     $shape = if ($null -eq $json) { 'non-JSON' }
              elseif ($json -is [array]) { "array[$($json.Count)]" }
              else { 'object{' + (($json.PSObject.Properties.Name | Select-Object -First 8) -join ',') + '}' }
     $rate = ($r.Headers.Keys | Where-Object { $_ -match '(?i)rate' } | ForEach-Object { "$_=$($r.Headers[$_] -join ',')" }) -join '; '
     $row = [pscustomobject]@{
-        Id = $Id; Question = $Question; Method = $Method; Path = $Path; Status = [int]$r.StatusCode; Ms = $sw.ElapsedMilliseconds
+        Id = $Id; Question = $Question; Method = $Method; Path = $Path; Status = $status; Ms = $sw.ElapsedMilliseconds
         Shape = $shape; RateHeaders = $rate
         DateFields = ((Get-DateLikeFields -Obj $json | Select-Object -First 6) -join ' | ')
-        Error = if ([int]$r.StatusCode -ge 400) { ($r.Content | Out-String).Trim().Substring(0, [math]::Min(250, ($r.Content | Out-String).Trim().Length)) } else { $null }
+        Error = if ($status -ge 400) { $text = "$($r.Content)".Trim(); $text.Substring(0, [math]::Min(250, $text.Length)) }
     }
     $results.Add($row)
     $colour = if ($row.Status -lt 300) { 'Green' } elseif ($row.Status -in 401, 403) { 'Yellow' } else { 'Red' }
     Write-Host ("{0,-4} {1,-6} {2,3} {3,5}ms  {4}" -f $Id, $Method, $row.Status, $row.Ms, $Path) -ForegroundColor $colour
-    $json
+    # Wrapped so callers get the status with the body, and a one-element array is not unrolled.
+    [pscustomobject]@{ Status = $status; Json = $json }
 }
 
 # Builds a PUT /sf/contacts/{id} body from a GET /sf/contactsByIds record, keeping only the fields
@@ -97,6 +104,9 @@ function ConvertTo-BglContactUpdate {
               'usi', 'memberAccountNumber', 'spin', 'establishmentDate'
     $out = [ordered]@{}
     foreach ($f in $fields) { if ($null -ne $Contact.$f) { $out[$f] = $Contact.$f } }
+    # GET can return sex as 'MALE'; PUT accepts only 'Male'/'Female'. abn/acn are sent exactly as read:
+    # converting them to numbers (as the PUT table suggests) would drop an ACN's leading zero.
+    if ($out.Contains('sex')) { $out['sex'] = (Get-Culture).TextInfo.ToTitleCase("$($out['sex'])".ToLowerInvariant()) }
     if ($Contact.address) {
         $addr = [ordered]@{}
         foreach ($f in 'streetLine1', 'streetLine2', 'city', 'state', 'postCode', 'country') {
@@ -105,6 +115,15 @@ function ConvertTo-BglContactUpdate {
         if ($addr.Count) { $out['address'] = $addr }
     }
     [pscustomobject]$out
+}
+
+# Names of top-level fields whose values differ between two records (compared as compact JSON).
+function Compare-BglRecord {
+    param([Parameter(Mandatory)]$Before, [Parameter(Mandatory)]$After)
+    $names = @($Before.PSObject.Properties.Name) + @($After.PSObject.Properties.Name) | Sort-Object -Unique
+    foreach ($n in $names) {
+        if (($Before.$n | ConvertTo-Json -Depth 10 -Compress) -cne ($After.$n | ConvertTo-Json -Depth 10 -Compress)) { $n }
+    }
 }
 
 $since = (Get-Date).ToUniversalTime().AddDays(-$ModifiedAfterDays).ToString('yyyy-MM-dd')
@@ -119,9 +138,11 @@ Invoke-Probe P03 'Rate limit status (free call)' '/client/rateLimitStatus' | Out
 
 Write-Host "`n--- SF360 entity access (scope coverage) ---" -ForegroundColor Cyan
 $funds = Invoke-Probe P04 'List entities/funds' '/fund/list'
-if (-not $FundId -and $funds) {
-    $first = @($funds) | Select-Object -First 1
-    $FundId = @($first.id, $first.fundId, $first.entityId) | Where-Object { $_ } | Select-Object -First 1
+if (-not $FundId -and $funds.Status -eq 200) {
+    # BGL documents the response as { "funds": [ { "fundID": ... } ] }; also accept a bare array.
+    $list = if ($null -ne $funds.Json.funds) { $funds.Json.funds } else { $funds.Json }
+    $first = @($list) | Select-Object -First 1
+    $FundId = @($first.fundID, $first.id, $first.entityId) | Where-Object { $_ } | Select-Object -First 1
     if ($FundId) { Write-Host "Using first fund: $FundId" -ForegroundColor DarkGray }
 }
 if ($FundId) {
@@ -134,7 +155,7 @@ if ($FundId) {
 else { Write-Warning 'No fund id found - pass -FundId to probe entity endpoints.' }
 
 Write-Host "`n--- Firm-wide lists (polling candidates) ---" -ForegroundColor Cyan
-$contacts = Invoke-Probe P10 'Firm contacts (paging)' '/sf/contacts?offset=0&limit=5'
+Invoke-Probe P10 'Firm contacts (paging)' '/sf/contacts?offset=0&limit=5' | Out-Null
 Invoke-Probe P11 "Firm lodgements modified after $since" "/sf/firm/lodgements?modifiedAfter=$since" | Out-Null
 Invoke-Probe P12 'Workflow jobs (status changes?)' '/sf/workflow/jobs?page=0&size=5' | Out-Null
 Invoke-Probe P13 'CAS companies (cas scope?)' '/cas/companies?offset=0&limit=5' | Out-Null
@@ -147,20 +168,26 @@ if ($WriteTestContactId) {
     }
     else {
         $existing = Invoke-Probe W01 'Read contact before write' "/sf/contactsByIds?ids=$WriteTestContactId"
-        $readStatus = $results[-1].Status
-        # Function output unrolls a one-element array, so match on contactId rather than the JSON shape.
-        $record = if ($readStatus -eq 200) {
-            @($existing) | Where-Object { $_.contactId -eq $WriteTestContactId } | Select-Object -First 1
+        $record = if ($existing.Status -eq 200) {
+            @($existing.Json) | Where-Object { $_.contactId -eq $WriteTestContactId } | Select-Object -First 1
         }
-        if ($record) {
+        if (-not $record) {
+            Write-Warning "Write test skipped: the read returned HTTP $($existing.Status) without contact $WriteTestContactId."
+        }
+        elseif ($PSCmdlet.ShouldProcess("contact $WriteTestContactId ($Environment)", 'PUT its documented fields back unchanged; omitted fields may be cleared')) {
             $body = ConvertTo-BglContactUpdate -Contact $record
-            Invoke-Probe W02 'PUT same values back (permission check)' "/sf/contacts/$WriteTestContactId" -Method PUT -Body $body | Out-Null
+            $put = Invoke-Probe W02 'PUT same values back (permission check)' "/sf/contacts/$WriteTestContactId" -Method PUT -Body $body
             $after = Invoke-Probe W03 'Read contact after write' "/sf/contactsByIds?ids=$WriteTestContactId"
-            $afterRecord = if ($results[-1].Status -eq 200) { @($after) | Where-Object { $_.contactId -eq $WriteTestContactId } | Select-Object -First 1 }
-            $same = $null -ne $afterRecord -and (($body | ConvertTo-Json -Depth 10 -Compress) -eq ((ConvertTo-BglContactUpdate -Contact $afterRecord) | ConvertTo-Json -Depth 10 -Compress))
-            Write-Host "Record unchanged after idempotent PUT: $same"
+            $afterRecord = if ($after.Status -eq 200) { @($after.Json) | Where-Object { $_.contactId -eq $WriteTestContactId } | Select-Object -First 1 }
+            if (-not $afterRecord) { Write-Warning "Could not re-read the contact (HTTP $($after.Status)) - check it by hand." }
+            else {
+                # Compare the WHOLE record, not just the fields sent, so collateral damage shows up.
+                $changed = @(Compare-BglRecord -Before $record -After $afterRecord)
+                if ($changed.Count) { Write-Host "PUT HTTP $($put.Status) changed fields: $($changed -join ', ')" -ForegroundColor Red }
+                else { Write-Host "PUT HTTP $($put.Status); record unchanged." -ForegroundColor Green }
+                $results[-1] | Add-Member -NotePropertyName ChangedFields -NotePropertyValue $changed
+            }
         }
-        else { Write-Warning "Write test skipped: the read returned HTTP $readStatus without contact $WriteTestContactId." }
     }
 }
 

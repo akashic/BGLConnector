@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Compiles one connector script (connector/<ScriptVariant>.csx) against Microsoft's documented
+    supporting classes. Driven by harness/Test-ConnectorCompile.ps1, which writes the wrapped source
+    to generated/<ScriptVariant>.g.cs first.
+
+    Target: .NET Framework 4.7.2 reference assemblies. The custom code sandbox is documented as
+    .NET Standard 2.0, which 4.7.2 implements, but plain netstandard2.0 lacks System.Web.HttpUtility,
+    which the sandbox supports. LangVersion 7.3 is a conservative guess at the platform's compiler.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <LangVersion>7.3</LangVersion>
+    <OutputType>Library</OutputType>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <ScriptVariant Condition="'$(ScriptVariant)' == ''">script</ScriptVariant>
+    <AssemblyName>$(ScriptVariant)</AssemblyName>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
+    <Reference Include="System.Web" />
+    <Reference Include="System.Net.Http" />
+    <Compile Include="Stubs.cs" />
+    <Compile Include="generated/$(ScriptVariant).g.cs" />
+  </ItemGroup>
+</Project>
