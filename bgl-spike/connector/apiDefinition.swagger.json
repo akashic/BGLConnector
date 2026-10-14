@@ -1,0 +1,391 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "title": "BGL SF360 Spike",
+    "description": "Spike connector to test BGL API OAuth, read/write access, and webhook signature handling in Power Platform. Not for production use.",
+    "version": "0.1.0"
+  },
+  "host": "api.staging.bgl360.com.au",
+  "basePath": "/",
+  "schemes": [
+    "https"
+  ],
+  "consumes": [
+    "application/json"
+  ],
+  "produces": [
+    "application/json"
+  ],
+  "securityDefinitions": {
+    "oauth2_auth": {
+      "type": "oauth2",
+      "flow": "accessCode",
+      "authorizationUrl": "https://integrations.staging.bgl360.com.au/u/oauth/authorize",
+      "tokenUrl": "https://api.staging.bgl360.com.au/oauth/token",
+      "scopes": {
+        "smsf_partner": "SF360 entities, documents, establishment and contacts"
+      }
+    }
+  },
+  "security": [
+    {
+      "oauth2_auth": [
+        "smsf_partner"
+      ]
+    }
+  ],
+  "paths": {
+    "/user/detail": {
+      "get": {
+        "operationId": "GetUserDetail",
+        "summary": "Get user details",
+        "description": "Who authorised the connection (T04: proves OAuth works).",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "/account/detail": {
+      "get": {
+        "operationId": "GetAccountDetail",
+        "summary": "Get account details",
+        "description": "Firm details including bglAccountId.",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "/client/rateLimitStatus": {
+      "get": {
+        "operationId": "GetRateLimitStatus",
+        "summary": "Get rate limit status",
+        "description": "Current rate limits; does not count towards the limit.",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "/fund/list": {
+      "get": {
+        "operationId": "ListFunds",
+        "summary": "List entities",
+        "description": "All SF360 entities the authorising user granted access to.",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "/sf/funds/{fundId}": {
+      "get": {
+        "operationId": "GetFund",
+        "summary": "Get entity details",
+        "description": "Details for one SF360 entity.",
+        "parameters": [
+          {
+            "name": "fundId",
+            "in": "path",
+            "required": true,
+            "type": "string",
+            "description": "BGL fund/entity ID",
+            "x-ms-summary": "fundId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "/sf/contacts": {
+      "get": {
+        "operationId": "ListContacts",
+        "summary": "List firm contacts",
+        "description": "Paged firm contacts.",
+        "parameters": [
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "type": "integer",
+            "description": "Paging offset",
+            "x-ms-summary": "offset"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "type": "integer",
+            "description": "Page size",
+            "x-ms-summary": "limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "/sf/firm/lodgements": {
+      "get": {
+        "operationId": "ListFirmLodgements",
+        "summary": "List firm lodgements",
+        "description": "Polling candidate: supports modifiedAfter/modifiedBefore.",
+        "parameters": [
+          {
+            "name": "modifiedAfter",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "description": "Date, e.g. 2026-09-01",
+            "x-ms-summary": "modifiedAfter"
+          },
+          {
+            "name": "modifiedBefore",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "description": "Date",
+            "x-ms-summary": "modifiedBefore"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "/funds/{fundId}/documents": {
+      "get": {
+        "operationId": "ListEntityDocuments",
+        "summary": "List entity documents",
+        "description": "Documents on the SF360 Documents screen.",
+        "parameters": [
+          {
+            "name": "fundId",
+            "in": "path",
+            "required": true,
+            "type": "string",
+            "description": "BGL fund/entity ID",
+            "x-ms-summary": "fundId"
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "description": "Optional tag filter",
+            "x-ms-summary": "tag"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "/spike/selftest": {
+      "post": {
+        "operationId": "SpikeSelfTest",
+        "summary": "Spike: signature self-test",
+        "description": "Custom code only. Checks HMAC-SHA256 against BGL's worked example (T07).",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "/spike/echo": {
+      "post": {
+        "operationId": "SpikeEcho",
+        "summary": "Spike: echo request context",
+        "description": "Custom code only. Shows the request URI and header names custom code sees for an action call.",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "/spike/validate-signature": {
+      "post": {
+        "operationId": "ValidateBglSignature",
+        "summary": "Spike: validate BGL signature",
+        "description": "Custom code only. Recomputes BGL's HMAC-SHA256 signature for a received webhook (T08, T11).",
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "type": "object",
+              "properties": {
+                "authorizationHeader": {
+                  "type": "string",
+                  "x-ms-summary": "Authorization header",
+                  "description": "Exactly as received from BGL"
+                },
+                "url": {
+                  "type": "string",
+                  "x-ms-summary": "URL BGL called",
+                  "description": "Full URL including query string, as registered with BGL"
+                },
+                "rawBody": {
+                  "type": "string",
+                  "x-ms-summary": "Raw body",
+                  "description": "Request body exactly as received"
+                },
+                "secret": {
+                  "type": "string",
+                  "format": "password",
+                  "x-ms-summary": "Shared secret",
+                  "description": "Spike only - use a secret environment variable in real builds"
+                },
+                "expectedClientCode": {
+                  "type": "string",
+                  "x-ms-summary": "Expected client code"
+                },
+                "maxSkewSeconds": {
+                  "type": "integer",
+                  "x-ms-summary": "Max clock skew (s)",
+                  "default": 300
+                }
+              },
+              "required": [
+                "authorizationHeader",
+                "url",
+                "rawBody",
+                "secret"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "/spike/proxy-url": {
+      "post": {
+        "operationId": "CreateNotificationProxyUrl",
+        "summary": "Spike: create notification proxy URL",
+        "description": "Custom code only, proxy variant. Tests whether Context.CreateNotificationUri works from an action (T09).",
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "type": "object",
+              "properties": {
+                "targetUrl": {
+                  "type": "string",
+                  "x-ms-summary": "Target URL",
+                  "description": "Flow HTTP trigger URL to forward diagnostics to"
+                }
+              },
+              "required": [
+                "targetUrl"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    },
+    "/spike/webhook": {
+      "post": {
+        "operationId": "SpikeWebhookReceiver",
+        "summary": "Spike: webhook receiver (internal)",
+        "description": "Custom code only, proxy variant. Receives proxied webhooks and forwards diagnostics (T10).",
+        "x-ms-visibility": "internal",
+        "parameters": [
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "description": "Base64 target URL",
+            "x-ms-summary": "target"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": false,
+            "schema": {
+              "type": "object"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    }
+  }
+}

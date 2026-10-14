@@ -1,0 +1,45 @@
+{
+  "properties": {
+    "connectionParameters": {
+      "token": {
+        "type": "oauthSetting",
+        "oAuthSettings": {
+          "identityProvider": "oauth2",
+          "clientId": "REPLACE_WITH_BGL_CLIENT_ID",
+          "scopes": [
+            "smsf_partner"
+          ],
+          "redirectMode": "GlobalPerConnector",
+          "redirectUrl": "https://global.consent.azure-apim.net/redirect",
+          "properties": {
+            "IsFirstParty": "False",
+            "IsOnbehalfofLoginSupported": false
+          },
+          "customParameters": {
+            "authorizationUrlTemplate": {
+              "value": "https://integrations.staging.bgl360.com.au/u/oauth/authorize"
+            },
+            "tokenUrlTemplate": {
+              "value": "https://api.staging.bgl360.com.au/oauth/token"
+            },
+            "refreshUrlTemplate": {
+              "value": "https://api.staging.bgl360.com.au/oauth/token"
+            }
+          }
+        }
+      }
+    },
+    "iconBrandColor": "#1F4E79",
+    "scriptOperations": [
+      "SpikeSelfTest",
+      "SpikeEcho",
+      "ValidateBglSignature",
+      "CreateNotificationProxyUrl",
+      "SpikeWebhookReceiver"
+    ],
+    "capabilities": [],
+    "policyTemplateInstances": [],
+    "publisher": "BGL SF360 Spike",
+    "stackOwner": "BGL Corporate Solutions"
+  }
+}
