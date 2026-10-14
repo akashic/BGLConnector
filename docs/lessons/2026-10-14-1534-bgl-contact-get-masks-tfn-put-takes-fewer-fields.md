@@ -26,7 +26,8 @@ provenance:
     BGL Postman collection (github.com/BGLCorp/bgl-api-doc, docs/api-doc.json) requests
     "List of Contacts by IDs" and "Update Contacts"; commit 9aa4adb (PUT field whitelist);
     bgl-spike/harness/Invoke-BglProbe.ps1 ConvertTo-BglContactUpdate and Compare-BglRecord;
-    docs/journal/2026-10-14.md 15:26 entry
+    docs/journal/2026-10-14.md 15:26 entry; commits 35b0ed5 and ddd7858 (per-type fields, state and
+    date normalisation, before/after diffs; BGL GET examples return "state": "VICTORIA")
   author:
 related: []
 proposed_tags: []
@@ -41,9 +42,11 @@ The T13 "idempotent write" probe PUT the GET record straight back. A first revie
 GET and PUT have different shapes. GET returns read-only fields (`contactId`, `contactType`, `entityRelationships`, `addressId`) and masked ones (`tfn`). PUT documents a narrower set, and some values differ in form: `sex` comes back as `MALE`, while PUT accepts only `Male`/`Female`. BGL doesn't say whether omitted PUT fields are left alone or cleared.
 
 ## What to do instead
-- Build the PUT body from BGL's documented PUT fields only, without `tfn`.
+- Build the PUT body from BGL's documented PUT fields only, without `tfn`, and only the fields its table allows for the contact's `contactType` (for example, no `email` on a Company).
+- Normalise values to PUT's formats. States must be one of the eight codes: GET examples return `VICTORIA`, and BGL uses `NEW_SOUTH_WALES` elsewhere. Dates: `birthday`/`dateOfDeath` as `yyyy-MM-dd`, `establishmentDate` as `yyyy/MM/dd`. BGL's GET table and examples disagree on date format.
+- Send the body as UTF-8 bytes, so names like O’Brien survive the round trip.
 - Send `abn`/`acn` exactly as read. Converting them to numbers, as the PUT table suggests, drops an ACN's leading zero.
-- Compare the whole GET record before and after, and list every changed field.
+- Compare the whole GET record before and after, and list every changed field with before and after values. Treat an `addressId`-only change as harmless.
 - Run write tests only against a throwaway staging contact, and require confirmation.
 
 ## How to recognise it early
