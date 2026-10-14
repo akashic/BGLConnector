@@ -52,7 +52,7 @@ Every test has an ID from **T01 to T15**. Each records a result in the test matr
 .
 ├── README.md                  This overview
 ├── CLAUDE.md                  Guidance for AI coding agents working in this repo
-├── .github/workflows/         CI: runs the offline checks on every push and pull request
+├── .github/workflows/         CI: runs the offline checks on pushes and pull requests (skips docs-only changes)
 ├── docs/
 │   ├── guides/                Reusable guides, e.g. testing a custom connector with paconn
 │   ├── journal/               Dated session notes
@@ -77,7 +77,7 @@ Every test has an ID from **T01 to T15**. Each records a result in the test matr
    ./Test-ConnectorCompile.ps1 # both connector scripts compile (needs the .NET SDK; first run downloads packages)
    ```
 
-   GitHub Actions runs the same three checks on every push and pull request (`.github/workflows/offline-checks.yml`).
+   GitHub Actions runs the same three checks on pushes and pull requests (`.github/workflows/offline-checks.yml`), except when a change only touches `docs/` or Markdown files.
 
 3. Follow the runbook's three parts in order:
    - **Part A**: the harness against BGL staging.

@@ -1,4 +1,5 @@
-# Runs the spike's offline checks on every push and pull request. They need no BGL credentials:
+# Runs the spike's offline checks on pushes and pull requests (except docs-only changes; see `on:`).
+# They need no BGL credentials:
 #   - Test-BglSignature.ps1   T01: the harness signature matches BGL's worked example
 #   - Test-ConnectorSync.ps1  the two connector scripts and the connector definition agree, and the
 #                             deploy-time constants (ProxyTargetPrefix, SpikeTestSecret) are empty, so a
@@ -6,9 +7,17 @@
 #   - Test-ConnectorCompile.ps1  both connector scripts compile against Microsoft's documented stubs
 name: Offline checks
 
+# Pushes and pull requests that only change docs/ or Markdown files are skipped: none of the checks
+# read them. A change mixing those with anything else still runs. workflow_dispatch always runs.
 on:
   push:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
   workflow_dispatch:
 
 permissions:
