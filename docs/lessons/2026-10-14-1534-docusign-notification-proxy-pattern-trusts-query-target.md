@@ -16,8 +16,8 @@ tech: [power-platform-custom-connectors, csharp-script, power-automate]
 scope: this-stack
 cost_if_ignored: project-level
 confidence: one-off
-status: active
-superseded_by:
+status: superseded
+superseded_by: 2026-10-14-1557-connector-proxy-target-needs-pinning-not-host-allow-list
 expires:
 provenance:
   projects: [bgl-connector]
@@ -28,9 +28,11 @@ provenance:
     RedirectWebhookNotification (logicAppsUri decoded from the query, no host check);
     bgl-spike/connector/script-with-proxy.csx IsAllowedTarget; bgl-spike/README.md T10
   author:
-related: []
+related: [2026-10-14-1557-connector-proxy-target-needs-pinning-not-host-allow-list]
 proposed_tags: []
 ---
+
+> **Superseded.** The fix below (a host allow-list) is insufficient, and the threat model overstated: editing a proxy URL cannot capture webhooks BGL sends to the registered URL. See [2026-10-14-1557-connector-proxy-target-needs-pinning-not-host-allow-list](2026-10-14-1557-connector-proxy-target-needs-pinning-not-host-allow-list.md).
 
 When custom connector code copies the certified connectors' notification-proxy pattern, it forwards webhook headers and body to whatever target URL is in the notification URL's query string, with no check on where that is.
 
