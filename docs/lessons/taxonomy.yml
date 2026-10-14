@@ -1,0 +1,63 @@
+# Closed vocabularies for the frontmatter of docs/lessons/*.md.
+# This file is authoritative: if the capture-lesson skill's frontmatter-spec.md disagrees, this file wins.
+# Never invent a value in a lesson. Record a missing one in that lesson's `proposed_tags`, and add it here
+# once three lessons want it.
+#
+# The base vocabulary matches the other repos' lesson corpora so lessons can be compared and promoted
+# across projects. Values added for this repo are marked "(BGL spike)".
+
+lesson_type: [pitfall, convention, heuristic, estimate, tool-choice, anti-pattern, workaround]
+
+phase: [scoping, design, implementation, testing, deployment, operation, handover]
+
+# 1-3 per lesson
+domain:
+  - api              # request/response contracts, status codes, input validation
+  - identity         # Entra ID, managed identities, app registrations, OAuth
+  - security         # least privilege, hardening, abuse resistance, secrets, signatures, replay
+  - reliability      # timeouts, retries, idempotency, failure handling
+  - scaling          # instance counts, concurrency, throttling, rate limits
+  - integration      # Power Platform <-> Azure <-> Microsoft 365 <-> third-party API boundaries
+  - data-integrity   # (BGL spike) writes that can clear or corrupt records, masked or read-only fields
+  - infra            # Bicep, resource configuration
+  - ci               # pipelines, deployment automation
+  - observability    # logging, telemetry, alerting, run history
+  - tooling          # local developer tools, scripting languages and package managers
+  - source-control   # git, GitHub, repository visibility and history
+  - process          # how we review, research and decide
+
+# Optional; omit for tech-agnostic lessons
+tech:
+  - azure-functions
+  - azure-api-management             # (BGL spike) token-endpoint rewriting, fixed webhook receivers
+  - azure-key-vault                  # (BGL spike) secret environment variables for flows and connectors
+  - microsoft-graph
+  - exchange-online
+  - entra-id
+  - power-automate
+  - power-platform-custom-connectors
+  - pac-cli                          # (BGL spike) Power Platform CLI, connector create/update
+  - dataverse                        # (BGL spike) environment variables, unbound actions
+  - bgl-api                          # (BGL spike) BGL SF360 / CAS 360 REST API, OAuth and webhooks
+  - postman                          # collections and Documenter sites as API sources
+  - dotnet
+  - csharp-script                    # (BGL spike) custom connector .csx code (.NET Standard 2.0 sandbox)
+  - system-text-json
+  - newtonsoft-json                  # (BGL spike) JObject/JValue handling in connector code
+  - bicep
+  - github-actions
+  - git
+  - gh-cli
+  - homebrew
+  - powershell
+  - application-insights
+
+scope: [universal, this-org, this-stack, this-project]
+
+cost_if_ignored: [minor, rework, outage, project-level]
+
+confidence: [one-off, repeated, established]
+
+status: [active, superseded, retired]
+
+source: [incident, retro, pr-review, direct-experience, handover-doc]
