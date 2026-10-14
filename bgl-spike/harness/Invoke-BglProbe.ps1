@@ -167,7 +167,8 @@ function ConvertTo-BglStateCode {
         'AUSTRALIAN CAPITAL TERRITORY' = 'ACT'; 'NEW SOUTH WALES' = 'NSW'; 'VICTORIA' = 'VIC'; 'QUEENSLAND' = 'QLD'
         'SOUTH AUSTRALIA' = 'SA'; 'WESTERN AUSTRALIA' = 'WA'; 'TASMANIA' = 'TAS'; 'NORTHERN TERRITORY' = 'NT'
     }
-    $key = ($State.Trim() -replace '\s+', ' ').ToUpperInvariant()
+    # BGL also uses enum-style names elsewhere (NEW_SOUTH_WALES, WESTERN_AUSTRALIA), so treat _ as a space.
+    $key = ($State.Trim() -replace '[\s_]+', ' ').ToUpperInvariant()
     if ($key -in $codes) { return $key }
     if ($names.ContainsKey($key)) { return $names[$key] }
     Write-Warning "State '$State' has no PUT code - sent unchanged; a 400 may come from this field."

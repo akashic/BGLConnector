@@ -67,9 +67,14 @@ public class Script : ScriptBase
         const string expected = "fcCSdGwSgTXseS5eFWOphImuEM9LT6KjgHfuiPWB48A=";
 
         var actual = ComputeSignature(ts, url, body, secret);
+        // A header signed with an empty key must not verify against an empty secret.
+        var emptyKeyHeader = "attacker " + ts + " " + ComputeSignature(ts, url, body, "");
+        var emptySecretRejected = !(bool)Verify(emptyKeyHeader, url, body, "", null, 0)["isValid"];
         return Json(HttpStatusCode.OK, new JObject
         {
-            ["pass"] = FixedTimeEquals(actual, expected),
+            ["pass"] = FixedTimeEquals(actual, expected) && emptySecretRejected,
+            ["signatureMatches"] = FixedTimeEquals(actual, expected),
+            ["emptySecretRejected"] = emptySecretRejected,
             ["expected"] = expected,
             ["actual"] = actual
         });
@@ -112,6 +117,9 @@ public class Script : ScriptBase
     private static JObject Verify(string header, string url, string body, string secret, string expectedClientCode, int maxSkewSeconds)
     {
         var r = new JObject { ["isValid"] = false };
+        // Fail closed: .NET computes an HMAC with an empty key, so a missing secret (for example a Key Vault
+        // lookup that returned null) would let anyone sign a valid header. The harness rejects it too.
+        if (string.IsNullOrEmpty(secret)) { r["reason"] = "Secret is empty"; return r; }
         // Single spaces only, matching BGL's format and Test-BglAuthorizationHeader in the harness.
         var parts = header.Trim().Split(' ');
         if (parts.Length != 3) { r["reason"] = $"Expected 3 header parts, got {parts.Length}"; return r; }
@@ -180,6 +188,11 @@ public class Script : ScriptBase
             && string.Equals(uri.AbsolutePath, allowed.AbsolutePath, StringComparison.Ordinal);
     }
 
+    private static readonly HashSet<string> EchoedHeaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "Content-Type", "Content-Length", "Content-Encoding", "User-Agent", "Host", "Accept", "Accept-Encoding"
+    };
+
     // ---------- T09: can an ACTION create a notification proxy URL? ----------
     // Uses Context.CreateNotificationUri, as the DocuSign certified connector does for triggers.
     private async Task<HttpResponseMessage> CreateProxyUrl()
@@ -219,11 +232,15 @@ public class Script : ScriptBase
         if (this.Context.Request.Headers.TryGetValues("Authorization", out values)) auth = values.FirstOrDefault();
         var platformReplacedAuth = auth != null && auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase);
 
+        // Values are echoed only for headers known to be harmless; others are listed by name, in case the
+        // platform adds a credential-bearing header to proxied requests.
         var headers = new JObject();
         foreach (var h in this.Context.Request.Headers)
-            headers[h.Key] = h.Key.Equals("Authorization", StringComparison.OrdinalIgnoreCase) ? "(see authorizationHeader)" : string.Join(",", h.Value);
+            headers[h.Key] = h.Key.Equals("Authorization", StringComparison.OrdinalIgnoreCase) ? "(see authorizationHeader)"
+                : EchoedHeaders.Contains(h.Key) ? string.Join(",", h.Value) : "(value not shown)";
         if (this.Context.Request.Content != null)
-            foreach (var h in this.Context.Request.Content.Headers) headers["content:" + h.Key] = string.Join(",", h.Value);
+            foreach (var h in this.Context.Request.Content.Headers)
+                headers["content:" + h.Key] = EchoedHeaders.Contains(h.Key) ? string.Join(",", h.Value) : "(value not shown)";
 
         var requestUri = this.Context.Request.RequestUri?.ToString();
         var originalUri = this.Context.OriginalRequestUri?.ToString();

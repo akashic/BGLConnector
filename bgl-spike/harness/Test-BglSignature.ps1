@@ -21,6 +21,7 @@ $tests = @(
     @{ Name = 'Rejects re-serialised body (pretty JSON)'; Pass = -not (Test-BglAuthorizationHeader -AuthorizationHeader $header -Url $url -Body ($body | ConvertFrom-Json | ConvertTo-Json -Depth 5) -Secret $secret -UtcNow $exampleTime).IsValid }
     @{ Name = 'Rejects different URL (query string added)'; Pass = -not (Test-BglAuthorizationHeader -AuthorizationHeader $header -Url "${url}?sig=abc" -Body $body -Secret $secret -UtcNow $exampleTime).IsValid }
     @{ Name = 'Rejects tab-separated header (same rule as the connector)'; Pass = -not (Test-BglAuthorizationHeader -AuthorizationHeader ($header -replace ' ', "`t") -Url $url -Body $body -Secret $secret -UtcNow $exampleTime).IsValid }
+    @{ Name = 'Rejects an empty secret (the connector fails closed too)'; Pass = $(try { Test-BglAuthorizationHeader -AuthorizationHeader $header -Url $url -Body $body -Secret '' | Out-Null; $false } catch { $true }) }
     @{ Name = 'Rejects wrong secret'; Pass = -not (Test-BglAuthorizationHeader -AuthorizationHeader $header -Url $url -Body $body -Secret 'wrong' -UtcNow $exampleTime).IsValid }
     @{ Name = 'Rejects stale timestamp (skew window)'; Pass = -not (Test-BglAuthorizationHeader -AuthorizationHeader $header -Url $url -Body $body -Secret $secret -MaxSkewSeconds 300).IsValid }
     @{ Name = 'Round trip: new header verifies now'; Pass = (Test-BglAuthorizationHeader -AuthorizationHeader (New-BglAuthorizationHeader -ClientCode 'SPIKE' -Url $url -Body $body -Secret $secret) -Url $url -Body $body -Secret $secret -ExpectedClientCode 'spike').IsValid }

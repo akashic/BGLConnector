@@ -71,9 +71,14 @@ public class Script : ScriptBase
         const string expected = "fcCSdGwSgTXseS5eFWOphImuEM9LT6KjgHfuiPWB48A=";
 
         var actual = ComputeSignature(ts, url, body, secret);
+        // A header signed with an empty key must not verify against an empty secret.
+        var emptyKeyHeader = "attacker " + ts + " " + ComputeSignature(ts, url, body, "");
+        var emptySecretRejected = !(bool)Verify(emptyKeyHeader, url, body, "", null, 0)["isValid"];
         return Json(HttpStatusCode.OK, new JObject
         {
-            ["pass"] = FixedTimeEquals(actual, expected),
+            ["pass"] = FixedTimeEquals(actual, expected) && emptySecretRejected,
+            ["signatureMatches"] = FixedTimeEquals(actual, expected),
+            ["emptySecretRejected"] = emptySecretRejected,
             ["expected"] = expected,
             ["actual"] = actual
         });
@@ -116,6 +121,9 @@ public class Script : ScriptBase
     private static JObject Verify(string header, string url, string body, string secret, string expectedClientCode, int maxSkewSeconds)
     {
         var r = new JObject { ["isValid"] = false };
+        // Fail closed: .NET computes an HMAC with an empty key, so a missing secret (for example a Key Vault
+        // lookup that returned null) would let anyone sign a valid header. The harness rejects it too.
+        if (string.IsNullOrEmpty(secret)) { r["reason"] = "Secret is empty"; return r; }
         // Single spaces only, matching BGL's format and Test-BglAuthorizationHeader in the harness.
         var parts = header.Trim().Split(' ');
         if (parts.Length != 3) { r["reason"] = $"Expected 3 header parts, got {parts.Length}"; return r; }

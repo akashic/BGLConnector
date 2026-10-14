@@ -174,21 +174,34 @@ foreach ($s in $styles) {
 $refreshResults = @()
 if ($goodToken -and -not $SkipRefreshTest) {
     Write-Host "`n=== Refresh token tests ===" -ForegroundColor Cyan
-    # refresh_token_expires_at is in whole seconds; wait so a sliding expiry can't look unchanged.
-    Start-Sleep -Seconds 2
+    # Every style is compared with the refresh-token expiry from the code exchange, captured once here.
+    # Comparing with the previous style's token would put both values in the same whole second.
+    $exchangeExpiry = $goodToken.refresh_token_expires_at
+    $exchangeExpiresIn = $goodToken.expires_in
     $currentRefresh = $goodToken.refresh_token
     $previousRefresh = $null; $workingStyle = $null
     foreach ($s in $styles) {
+        # refresh_token_expires_at is in whole seconds; wait before each refresh so a sliding expiry is visible.
+        Start-Sleep -Seconds 2
+        $accessBefore = $goodToken.access_token
         $r = Invoke-TokenRequest -Style $s -Grant @{ grant_type = 'refresh_token'; refresh_token = $currentRefresh }
         $rotated = [bool]($r.Success -and $r.Token.refresh_token -and ($r.Token.refresh_token -ne $currentRefresh))
         # Does refreshing push the refresh token's expiry out (sliding), or is the 30 days fixed from first
         # consent? A keep-alive flow only helps if it slides.
         # BGL documents refresh_token_expires_at on the code exchange but not on the refresh response, so a
         # missing field means "unknown", not "not extended".
-        $expiryBefore = $goodToken.refresh_token_expires_at
+        # If BGL handed back the existing, still-valid token (same access token, is_new_token false, or a
+        # shorter expires_in than the exchange), this refresh says nothing about what happens after the
+        # 7-day access token expires, which is the case a keep-alive depends on.
+        $expiryBefore = $exchangeExpiry
         $expiryAfter = $r.Token.refresh_token_expires_at
         $deltaSeconds = if ($r.Success -and $expiryBefore -and $expiryAfter) { [long]$expiryAfter - [long]$expiryBefore }
+        $existingReturned = $r.Success -and (
+            ($r.Token.access_token -and $r.Token.access_token -eq $accessBefore) -or
+            ($r.IsNewToken -eq $false) -or
+            ($exchangeExpiresIn -and $r.Token.expires_in -and [long]$r.Token.expires_in -lt [long]$exchangeExpiresIn))
         $extended = if (-not $r.Success) { $null }
+                    elseif ($existingReturned) { 'Inconclusive (existing token returned)' }
                     elseif ($null -eq $deltaSeconds) { 'Unknown (refresh_token_expires_at not returned)' }
                     elseif ($deltaSeconds -gt 0) { 'Extended' } else { 'NotExtended' }
         $refreshResults += [pscustomobject]@{

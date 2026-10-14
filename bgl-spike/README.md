@@ -178,11 +178,11 @@ BGL signs the exact URL it calls, so the registered URL and the `bgl_spike_trigg
 
 | ID | Question | How | Pass criteria | Result |
 | --- | --- | --- | --- | --- |
-| T01 | Does the harness reproduce BGL's signature exactly? | `Test-BglSignature.ps1` | All 9 checks pass | |
+| T01 | Does the harness reproduce BGL's signature exactly? | `Test-BglSignature.ps1` | All 10 checks pass | |
 | T02 | Do authorize and the 127.0.0.1 redirect work in staging? Is the staging authorize URL right? | `Get-BglToken.ps1` | Code received. If not, record the correct URL from BGL. | |
 | T03 | Which token request styles does BGL accept? | `Get-BglToken.ps1 -TestAllStyles` | Record each style. **Key question: does `FormBody` succeed?** | |
 | T04 | Does Power Platform's generic OAuth 2.0 provider work with BGL? | Create a connection (C4), run *Get user details* | Connection is created and the action returns 200 | |
-| T05 | Does BGL rotate refresh tokens? Does reusing an old one revoke the new one? Does refreshing extend the refresh token's 30-day expiry? | `Get-BglToken.ps1` refresh section | Record rotated, reusable, current-still-valid, `RefreshExpiryExtended` (`Extended`, `NotExtended` or `Unknown`), `RefreshExpiryDeltaSeconds` and `is_new_token` | |
+| T05 | Does BGL rotate refresh tokens? Does reusing an old one revoke the new one? Does refreshing extend the refresh token's 30-day expiry? | `Get-BglToken.ps1` refresh section | Record rotated, reusable, current-still-valid, `RefreshExpiryExtended`, `RefreshExpiryDeltaSeconds` and `is_new_token`. `RefreshExpiryExtended` is `Extended`, `NotExtended`, or a value starting `Unknown` or `Inconclusive`. Every style is compared with the code exchange's expiry. | |
 | T06 | Which endpoints does the granted scope reach? | `Invoke-BglProbe.ps1` | 200 vs 401/403 per endpoint | |
 | T07 | Does HMAC-SHA256 run in the custom code sandbox? | *Spike: signature self-test* action | `pass: true` | |
 | T08 | Can a flow verify a signature through the connector action? | Simulator → Flow A | Valid message accepted; all tamper cases rejected | |
@@ -190,7 +190,7 @@ BGL signs the exact URL it calls, so the registered URL and the `bgl_spike_trigg
 | T10 | Does a proxied webhook keep its Authorization header, body and a verifiable URL? Does the platform reject an edited proxy URL? | Simulator → proxyUrl → Flow B, then the edited-`target` check | Header not replaced, body intact, signature verifies against a known URL; record whether the edited URL was rejected | |
 | T11 | Does `string(triggerBody())` keep the exact bytes BGL signed? | Simulator → Flow A with `-BodyStyle Compact` and `-BodyStyle Bgl`, compare `isValid` | Both verify. If either fails, raw-body fidelity rules out this design. | |
 | T12 | What does a real BGL Audit webhook look like? Can owner apps register one? | Portal registration and *Send to Audit* | Message received and verified with the real secret | |
-| T13 | Can client details be written with the granted scope? | Probe `-WriteTestContactId` (throwaway staging contact) | PUT returns 2xx and no field changed (the script lists any that did) | |
+| T13 | Can client details be written with the granted scope? | Probe `-WriteTestContactId` (throwaway staging contact) | PUT returns 2xx and no field changed (the script lists any that did, with before and after values). BGL's PUT example names `address.suburb` and `phone1` where its table and GET use `city` and `telephone`, so a changed `address.city` may come from that naming. | |
 | T14 | Is polling feasible for SF360 changes? | Probe date fields, lodgements `modifiedAfter` | Record which endpoints expose usable change dates or filters | |
 | T15 | What are the actual rate limits for the app? | Probe P03 and the headers | Record the 10-minute and daily limits | |
 
@@ -207,7 +207,10 @@ BGL signs the exact URL it calls, so the registered URL and the `bgl_spike_trigg
 
 - If refreshing extends the refresh token's expiry (`RefreshExpiryExtended` is `Extended`), add a weekly keep-alive flow that calls *Get rate limit status*. It's free against the rate limit, and each weekly call triggers a refresh once the 7-day access token has expired, which pushes the 30-day expiry out.
 - If the expiry is fixed from first consent (`NotExtended`), no keep-alive can save the connection: someone has to re-authorise it at least every 30 days, or a token-owning service (below) has to handle it.
-- If the result is `Unknown`, BGL's refresh response didn't include `refresh_token_expires_at`. That's what BGL's documented refresh example shows, so this is the likely outcome. Don't decide on a keep-alive until BGL answers open question 3.
+- If the result starts with `Unknown`, BGL's refresh response didn't include `refresh_token_expires_at`. That's what BGL's documented refresh example shows, so this is the likely outcome.
+- If it starts with `Inconclusive`, BGL handed back the existing, still-valid token (same access token, `is_new_token` false, or a shorter `expires_in`).
+
+T05 refreshes within minutes of consent, while the access token is still valid. A keep-alive depends on what happens when the refresh comes *after* the 7-day access token has expired, which one session can't observe. Treat anything other than a clear `Extended` or `NotExtended` as undecided, and don't choose a keep-alive design until BGL answers open question 3.
 
 **Webhooks:** registration is a fixed URL per message type, so a **fixed receiver** is needed:
 
@@ -228,6 +231,7 @@ BGL signs the exact URL it calls, so the registered URL and the `bgl_spike_trigg
 5. The webhook docs list `documentChange` with sub-types in one place, and `newDocument`/`deleteDocument`/`newStatus`/`newAttachment` in another. Which `eventType` values are actually sent today?
 6. What are the webhook retry policy, delivery timeout and source IP ranges (for allow-listing)?
 7. Is there a change feed or `modifiedAfter` filter for SF360 funds and contacts?
+8. Your *Update Contacts* example body uses `address.suburb` and `phone1`, but the field table and GET responses use `city` and `telephone`. Which names does `PUT /sf/contacts/{id}` accept?
 
 ---
 
