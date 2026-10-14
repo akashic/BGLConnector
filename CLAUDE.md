@@ -18,6 +18,8 @@ Everything is PowerShell 7 (`pwsh`), run from `bgl-spike/harness/`. There is no 
 ./Test-BglSignature.ps1        # T01: offline, no credentials. Exit 0 = pass.
 ./Test-ConnectorSync.ps1       # Offline: shared .csx code and operation lists agree. Run after any connector edit.
 ./Test-ConnectorCompile.ps1    # Compiles both .csx files (needs the .NET SDK). Run after any connector edit.
+# CI (.github/workflows/offline-checks.yml) runs all three on every push and PR, on ubuntu-latest with .NET 8.
+# The sync check runs there WITHOUT -AllowDeployValues, so CI fails if ProxyTargetPrefix or SpikeTestSecret is committed.
 ```
 
 The other harness scripts call real BGL staging and need a BGL app client ID/secret plus an interactive browser consent. Don't run them unless the user asks:

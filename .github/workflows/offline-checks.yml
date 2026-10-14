@@ -1,0 +1,47 @@
+# Runs the spike's offline checks on every push and pull request. They need no BGL credentials:
+#   - Test-BglSignature.ps1   T01: the harness signature matches BGL's worked example
+#   - Test-ConnectorSync.ps1  the two connector scripts and the connector definition agree, and the
+#                             deploy-time constants (ProxyTargetPrefix, SpikeTestSecret) are empty, so a
+#                             trigger URL or test secret can't be merged into this public repo
+#   - Test-ConnectorCompile.ps1  both connector scripts compile against Microsoft's documented stubs
+name: Offline checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: bgl-spike/harness
+    steps:
+      # Actions are pinned to commit SHAs; the comment gives the release.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Show tool versions
+        run: |
+          $PSVersionTable.PSVersion.ToString()
+          dotnet --version
+
+      - name: T01 signature tests
+        run: ./Test-BglSignature.ps1
+
+      - name: Connector sync check
+        run: ./Test-ConnectorSync.ps1
+
+      - name: Connector compile check
+        run: ./Test-ConnectorCompile.ps1

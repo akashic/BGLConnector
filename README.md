@@ -1,5 +1,7 @@
 # BGL Connector spike
 
+[![Offline checks](https://github.com/akashic/BGLConnector/actions/workflows/offline-checks.yml/badge.svg)](https://github.com/akashic/BGLConnector/actions/workflows/offline-checks.yml)
+
 A technical spike that tests how far Microsoft Power Platform can integrate with the [BGL](https://www.bgl360.com.au/) SF360 and CAS 360 API on its own, and where Azure services are needed in front of it.
 
 It answers one question: **what can Power Platform do natively with the BGL API (OAuth, API calls, webhooks), and what needs Azure?**
@@ -50,6 +52,7 @@ Every test has an ID from **T01 to T15**. Each records a result in the test matr
 .
 ├── README.md                  This overview
 ├── CLAUDE.md                  Guidance for AI coding agents working in this repo
+├── .github/workflows/         CI: runs the offline checks on every push and pull request
 ├── docs/
 │   ├── journal/               Dated session notes
 │   └── lessons/               Lessons learned; taxonomy.yml defines the allowed tags
@@ -72,6 +75,8 @@ Every test has an ID from **T01 to T15**. Each records a result in the test matr
    ./Test-ConnectorSync.ps1    # the two connector scripts and the connector definition agree
    ./Test-ConnectorCompile.ps1 # both connector scripts compile (needs the .NET SDK; first run downloads packages)
    ```
+
+   GitHub Actions runs the same three checks on every push and pull request (`.github/workflows/offline-checks.yml`).
 
 3. Follow the runbook's three parts in order:
    - **Part A**: the harness against BGL staging.
