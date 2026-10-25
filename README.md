@@ -14,7 +14,7 @@ BGL's API has several traits that don't fit Power Platform's defaults:
 
 | BGL behaviour | Why it matters for Power Platform |
 | --- | --- |
-| Only the OAuth Authorization Code grant is supported, and the token call takes its parameters in the **query string** with a **Basic** auth header | Power Platform's generic OAuth 2.0 provider sends a standard form body. It may not be able to talk to BGL's token endpoint without a proxy. |
+| Only the OAuth Authorization Code grant is supported, and the token call takes its parameters in the **query string** with a **Basic** auth header | Power Platform's generic OAuth 2.0 provider sends a standard form body. Tested: BGL accepts that once the provider falls back to a Basic header, but the provider doesn't send the required `scope`, so the connector's token URL carries it (T03/T04). |
 | Access tokens last 7 days and refresh tokens 30 days | An idle connection dies after 30 days unless refreshing extends that expiry. |
 | Webhooks are registered against a fixed URL per message type in BGL's Developer Portal, with no subscription API | A native connector webhook trigger isn't possible, so receiving events needs a fixed endpoint. |
 | Webhooks are signed with HMAC-SHA256 over the timestamp, the full URL and the **exact raw body** | The receiver must see the exact bytes and URL BGL signed, which Power Automate may not preserve. |

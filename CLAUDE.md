@@ -35,7 +35,7 @@ Connector deployment (`pac connector create/update` with the three `connector/` 
 
 There are two independent implementations of the same BGL logic. They have to agree with each other.
 
-- **`harness/BglSpike.psm1`**: the shared module that every harness script imports. It holds the environment URLs (`Get-BglEnvironment`; the staging authorize URL is an *unconfirmed guess*), HMAC signing and verification, the Basic auth header, and token and result persistence. Tokens are written in plain text to `bgl-spike/.secrets/` and results to `bgl-spike/results/*.json`. Both locations are git-ignored.
+- **`harness/BglSpike.psm1`**: the shared module that every harness script imports. It holds the environment URLs (`Get-BglEnvironment`; the staging authorize URL was confirmed by T02), HMAC signing and verification, the Basic auth header, and token and result persistence. Tokens are written in plain text to `bgl-spike/.secrets/` and results to `bgl-spike/results/*.json`. Both locations are git-ignored.
 - **`connector/`**: a Power Platform custom connector.
   - `apiDefinition.swagger.json` defines real BGL GET operations, which pass straight through to `api.staging.bgl360.com.au`, plus fake `/spike/*` POST operations that custom code handles and never sends to BGL.
   - `apiProperties.json` holds the generic `oauth2` provider settings. `clientId` is the placeholder `REPLACE_WITH_BGL_CLIENT_ID`. `scriptOperations` lists the operations routed to code.
@@ -60,7 +60,7 @@ Cross-file invariants (`Test-ConnectorSync.ps1` checks the first two, and that t
 
 These come from BGL's Postman collection (github.com/BGLCorp/bgl-api-doc) and are summarised in the README:
 
-- Only the Authorization Code grant is available. BGL documents token parameters in the **query string** with a **Basic** header, but the generic Power Platform OAuth provider sends a form body. That mismatch is the key open question (T03/T04).
+- Only the Authorization Code grant is available. BGL documents token parameters in the **query string** with a **Basic** header. T03/T04 showed it also accepts them in a form body, but only with the client credentials in the Basic header, and `scope` is required (400 `invalid_scope` without it). The generic Power Platform OAuth provider falls back to a Basic header by itself but never sends `scope`, so `tokenUrlTemplate` and `refreshUrlTemplate` in `apiProperties.json` carry `?scope=smsf_partner`. Keep that query string in step with the `scopes` array.
 - Multiple scopes are separated by a literal `+` in both the authorize and token URLs. In `Get-BglToken.ps1`, `$scopeQuery` builds that for query strings and `$scopeForm` (space-separated) gives the same wire bytes in form bodies.
 - Access tokens last 7 days and refresh tokens 30 days, so an idle connection dies after 30 days.
 - Webhooks are registered per app in the BGL Developer Portal against a fixed URL. There is no subscribe API, so a native connector webhook trigger isn't possible. SF360 sends only the Audit event, so detecting client changes means polling.

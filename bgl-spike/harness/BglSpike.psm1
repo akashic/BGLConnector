@@ -11,8 +11,8 @@ $script:TimestampFormat = "yyyy-MM-dd'T'HH:mm:ss.fff'Z'"
 
 function Get-BglEnvironment {
     param([ValidateSet('Staging', 'Production')][string]$Environment = 'Staging')
-    # Production authorize URL is documented by BGL. The staging authorize URL is an
-    # assumption based on the naming pattern - confirm it with api@bglcorp.com.au (T03).
+    # Production authorize URL is documented by BGL. The staging one is shown in the BGL
+    # Developer Portal and was confirmed by T02.
     switch ($Environment) {
         'Staging' {
             [pscustomobject]@{

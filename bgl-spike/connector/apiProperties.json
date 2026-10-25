@@ -20,10 +20,10 @@
               "value": "https://integrations.staging.bgl360.com.au/u/oauth/authorize"
             },
             "tokenUrlTemplate": {
-              "value": "https://api.staging.bgl360.com.au/oauth/token"
+              "value": "https://api.staging.bgl360.com.au/oauth/token?scope=smsf_partner"
             },
             "refreshUrlTemplate": {
-              "value": "https://api.staging.bgl360.com.au/oauth/token"
+              "value": "https://api.staging.bgl360.com.au/oauth/token?scope=smsf_partner"
             }
           }
         }

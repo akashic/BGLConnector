@@ -20,8 +20,8 @@ Source: BGL's Postman collection, [github.com/BGLCorp/bgl-api-doc](https://githu
 | --- | --- | --- |
 | Grant types | **Authorization Code only.** No client credentials grant. | Every connection is tied to the BGL user who consents. Use a dedicated service BGL login. |
 | Token lifetimes | Auth code 10 min, access token 7 days, refresh token 30 days | A connection idle for 30 days dies. A keep-alive is needed (see Decision guide). |
-| Token request | `POST /oauth/token?grant_type=…&code=…&scope=…&redirect_uri=…` with **parameters in the query string** and a **Basic** auth header. Refresh uses the same endpoint with `grant_type=refresh_token&scope=…&refresh_token=…` | Power Platform's generic OAuth 2.0 provider is expected to send a form body instead. **T03/T04 test whether BGL accepts that.** |
-| Scope on token call | `scope` marked REQUIRED on the token request | The generic provider may not send scope on the token call. Also covered by T03. |
+| Token request | `POST /oauth/token?grant_type=…&code=…&scope=…&redirect_uri=…` with **parameters in the query string** and a **Basic** auth header. Refresh uses the same endpoint with `grant_type=refresh_token&scope=…&refresh_token=…` | **Tested (T03/T04):** BGL also accepts the parameters in a form body, but the client credentials must be in the Basic header; credentials in the body get a 401. Power Platform's generic OAuth 2.0 provider retries with a Basic header on its own. |
+| Scope on token call | `scope` marked REQUIRED on the token request | **Confirmed required:** without it BGL returns 400 `invalid_scope` ("Empty scope"). The generic provider doesn't send it, so the connector's token and refresh URLs carry `?scope=…` in their query string (T04). |
 | Redirect URIs | Up to 5 per app. `localhost` blocked, `127.0.0.1` allowed | Add the connector's redirect URL *and* `http://127.0.0.1:8765/callback` for the harness. |
 | Webhook registration | **Per app, in the BGL Developer Portal**: you enter a URL against each message type, and BGL must approve it. No subscription API. | A native connector webhook trigger (which needs a subscribe API) is not possible. Receiving needs a fixed URL. |
 | Webhook message types | Audit (**SF360**); New Company, Identity Check, Document Change (all **CAS 360**) | **SF360 only sends the Audit webhook.** Detecting SF360 client changes needs polling. |
@@ -30,7 +30,7 @@ Source: BGL's Postman collection, [github.com/BGLCorp/bgl-api-doc](https://githu
 | Owner applications | A firm accessing its own data emails api@bglcorp.com.au for Developer Portal access; staging is optional | The route for an organisation integrating with its own BGL data rather than building a product for other firms. |
 | Contact updates | `PUT /sf/contacts/{id}` accepts a narrower field set than `GET /sf/contactsByIds` returns; GET masks `tfn` as `Provided`/`Not Provided` | Never echo a GET record straight back. The T13 probe sends only the documented PUT fields and never `tfn`. |
 
-Relevant scopes: `smsf_partner` (SF360 entities, documents, establishment and contacts) and `bgl_partner` (adds CAS 360; the user needs both products). Multiple scopes are separated by a literal `+` in both the authorize URL and the token URL.
+Relevant scopes: `smsf_partner` (SF360 entities, documents, establishment and contacts) and `bgl_partner` (adds CAS 360; the user needs both products). Multiple scopes are separated by a literal `+` in both the authorize URL and the token URL. In the connector, a scope therefore goes in two places: the `scopes` array and the `?scope=` on its token and refresh URLs (C1).
 
 ---
 
@@ -65,8 +65,12 @@ cd harness
 # T02, T03, T05 - authorize, try all four token request styles, test refresh behaviour
 ./Get-BglToken.ps1 -ClientId '<client id>' -Scope smsf_partner -TestAllStyles
 #   You'll authorise once per style; after the first consent BGL should redirect immediately.
-#   If the browser can't reach the listener, add -ManualCode and paste the redirect URL.
-#   If the staging authorize URL is wrong, pass -AuthorizeUrl (see T02).
+#   If the browser can't reach the listener, add -ManualCode. After each Authorise, paste the URL of the
+#   127.0.0.1 page you land on (it contains code= and state=), not BGL's page: that has no code.
+#   Keep -RedirectUri on 127.0.0.1. Pointed at the connector's redirect URL, BGL sends the code to
+#   Microsoft's consent service, which rejects it ("No consent server information was associated
+#   with this request").
+#   A 401 from every style means BGL rejected the client ID and secret, not the request format.
 
 # T06, T14, T15 - which endpoints work with this scope, polling fields, rate limits
 #   Stops if the saved access token has expired (7 days); re-run Get-BglToken.ps1 first.
@@ -82,7 +86,7 @@ cd harness
 
 ### Part B: spike connector
 
-**C1. Set the client ID.** In `connector/apiProperties.json`, replace `REPLACE_WITH_BGL_CLIENT_ID`. If you need extra scopes, add them to the `scopes` array.
+**C1. Set the client ID.** In `connector/apiProperties.json`, replace `REPLACE_WITH_BGL_CLIENT_ID`. If you need extra scopes, add them to the `scopes` array **and** to the `?scope=` query string on `tokenUrlTemplate` and `refreshUrlTemplate`, joined with a literal `+` (`?scope=smsf_partner+bgl_partner`). Power Platform doesn't send `scope` on the token call, and BGL rejects the call without it (T04).
 
 **C2. Deploy the core variant.**
 
@@ -98,7 +102,19 @@ Portal alternative: Custom connectors → New → Import an OpenAPI file. Then o
 
 **C3. Finish security.** Open the connector → Security tab. Enter the client secret, then copy the **Redirect URL** shown there into the BGL app's redirect URLs.
 
-**C4. Create a connection** and run `Get user details` in a test flow. That is **T04**.
+- **The secret** is the one under the BGL app's *OAuth 2.0 Details*, not the webhook *Auth – Secret key* or the *Display code*. BGL shows it only once, when you click *Generate Secret*: copy it, click **Save** on the app, and use that same value in the connector and the harness. Power Platform asks for the secret again every time you update the connector.
+- **Keep the authorization, token and refresh URLs as deployed.** Don't paste in the examples from the portal's *OAuth URLs* box. Their query strings (`code=<AUTHCODE>`, `scope=developer`, `redirect_uri=…`) are templates, and BGL reads them in place of the values Power Platform sends.
+- **The redirect URL comes from the connector's name.** Renaming the connector gives it a new one. So does running `pac connector create` again, which makes a second connector named from the swagger title. Add the new URL to the BGL app, and delete any connector you aren't using so the flow can't pick it.
+
+**C4. Create a connection** and run `Get user details` in a test flow. That is **T04**. Start the sign-in from Power Platform's **Sign in** button, and don't refresh the pop-up or copy its URL into another tab. If it fails, the error text quotes BGL's response:
+
+| Error | Cause |
+| --- | --- |
+| BGL page: `Invalid redirect: … is not a registered redirect` | Add that exact URL to the BGL app's redirect URLs |
+| 401 `Full authentication is required to access this resource` on the *form body* attempt | Expected: BGL won't take credentials in the body. Power Platform then retries with a Basic header. |
+| 401 with an empty body on the *Basic authorization header* attempt | The client secret doesn't match BGL's current one (stale, not saved, or the wrong value) |
+| 400 `invalid_scope`, `Empty scope` | The token and refresh URLs are missing `?scope=…` |
+| `No consent server information was associated with this request` (Microsoft page) | The sign-in didn't start from Power Platform: a refreshed or copied pop-up, or another client pointed at the connector's redirect URL |
 
 **C5. Swap in the proxy variant** for T09/T10. First create Flow B's trigger (Part C, Flow B step 1) and set `ProxyTargetPrefix` in `script-with-proxy.csx` to its trigger URL up to, but not including, the `?`. The proxy refuses to forward anywhere else, and refuses everything while the constant is empty. Run `Test-ConnectorCompile.ps1` again, and `Test-ConnectorSync.ps1 -AllowDeployValues` (without the switch it fails while the constant is set). **Clear `ProxyTargetPrefix` and `SpikeTestSecret` before committing**: the repo is public, and the plain sync check fails until you do. Then:
 
@@ -179,10 +195,10 @@ BGL signs the exact URL it calls, so the registered URL and the `bgl_spike_trigg
 | ID | Question | How | Pass criteria | Result |
 | --- | --- | --- | --- | --- |
 | T01 | Does the harness reproduce BGL's signature exactly? | `Test-BglSignature.ps1` | All 10 checks pass | |
-| T02 | Do authorize and the 127.0.0.1 redirect work in staging? Is the staging authorize URL right? | `Get-BglToken.ps1` | Code received. If not, record the correct URL from BGL. | |
-| T03 | Which token request styles does BGL accept? | `Get-BglToken.ps1 -TestAllStyles` | Record each style. **Key question: does `FormBody` succeed?** | |
-| T04 | Does Power Platform's generic OAuth 2.0 provider work with BGL? | Create a connection (C4), run *Get user details* | Connection is created and the action returns 200 | |
-| T05 | Does BGL rotate refresh tokens? Does reusing an old one revoke the new one? Does refreshing extend the refresh token's 30-day expiry? | `Get-BglToken.ps1` refresh section | Record rotated, reusable, current-still-valid, `RefreshExpiryExtended`, `RefreshExpiryDeltaSeconds` and `is_new_token`. `RefreshExpiryExtended` is `Extended`, `NotExtended`, or a value starting `Unknown` or `Inconclusive`. Every style is compared with the code exchange's expiry. | |
+| T02 | Do authorize and the 127.0.0.1 redirect work in staging? Is the staging authorize URL right? | `Get-BglToken.ps1` | Code received. If not, record the correct URL from BGL. | **Pass** (2026-10-26). The authorize URL is confirmed (the Developer Portal shows it), and `http://127.0.0.1:8765/callback` works once registered. |
+| T03 | Which token request styles does BGL accept? | `Get-BglToken.ps1 -TestAllStyles` | Record each style. **Key question: does `FormBody` succeed?** | (2026-10-26) `BglDocumented` 200, `FormBody` 401, `FormBodyWithScope` 401, `FormBodyBasicAuth` 200. **`FormBody` fails:** credentials in the body get 401 `Full authentication is required to access this resource`. The credentials must be in the Basic header; the other parameters work in the query string or the form body. |
+| T04 | Does Power Platform's generic OAuth 2.0 provider work with BGL? | Create a connection (C4), run *Get user details* | Connection is created and the action returns 200 | **Pass, with `?scope=smsf_partner` on the token and refresh URLs** (2026-10-26): connection created and *Get user details* returned 200. The provider sends the credentials in the form body (401), then retries with a Basic header. That second attempt is the one that matters, and without the scope in the URL it gets 400 `invalid_scope` (`Empty scope`). |
+| T05 | Does BGL rotate refresh tokens? Does reusing an old one revoke the new one? Does refreshing extend the refresh token's 30-day expiry? | `Get-BglToken.ps1` refresh section | Record rotated, reusable, current-still-valid, `RefreshExpiryExtended`, `RefreshExpiryDeltaSeconds` and `is_new_token`. `RefreshExpiryExtended` is `Extended`, `NotExtended`, or a value starting `Unknown` or `Inconclusive`. Every style is compared with the code exchange's expiry. | (2026-10-26) Rotated: **yes**. Previous refresh token reusable: **no**. Current token still valid after the reuse attempt: **yes**. Expiry: `Inconclusive (existing token returned)` for both styles that worked, so this is undecided. Refreshing also needs the Basic header: the body-credential styles got 401. |
 | T06 | Which endpoints does the granted scope reach? | `Invoke-BglProbe.ps1` | 200 vs 401/403 per endpoint | |
 | T07 | Does HMAC-SHA256 run in the custom code sandbox? | *Spike: signature self-test* action | `pass: true` | |
 | T08 | Can a flow verify a signature through the connector action? | Simulator → Flow A | Valid message accepted; all tamper cases rejected | |
@@ -198,12 +214,14 @@ BGL signs the exact URL it calls, so the registered URL and the `bgl_spike_trigg
 
 ## Decision guide
 
-**If T03 shows only `BglDocumented` succeeds and T04 fails,** the generic OAuth provider can't talk to BGL's token endpoint as-is. The options are:
+**OAuth: T04 passed, so no token proxy is needed.** The generic OAuth provider works with BGL's token endpoint once the token and refresh URLs carry `?scope=…`. Had it failed, the options would have been:
 
 - Point the connector's token URL at an **APIM endpoint** that rewrites the form body into BGL's query string plus Basic header.
 - Have an **Azure Function own the BGL token** (refresh token in Key Vault), with the connector calling the Function using Entra ID.
 
-**If T04 passes,** native connectors work for API calls. Whether a keep-alive helps depends on T05:
+A token-owning Function is still an option if the 30-day refresh expiry (below) can't be managed any other way.
+
+**T04 passed, so native connectors work for API calls.** Whether a keep-alive helps depends on T05:
 
 - If refreshing extends the refresh token's expiry (`RefreshExpiryExtended` is `Extended`), add a weekly keep-alive flow that calls *Get rate limit status*. It's free against the rate limit, and each weekly call triggers a refresh once the 7-day access token has expired, which pushes the 30-day expiry out.
 - If the expiry is fixed from first consent (`NotExtended`), no keep-alive can save the connection: someone has to re-authorise it at least every 30 days, or a token-owning service (below) has to handle it.
@@ -224,8 +242,8 @@ T05 refreshes within minutes of consent, while the access token is still valid. 
 
 ## Open questions for BGL (api@bglcorp.com.au)
 
-1. What is the staging authorize URL?
-2. Does `/oauth/token` accept RFC 6749 form-encoded bodies with the client credentials in the body? Is `scope` required on the token call?
+1. What is the staging authorize URL? **Answered:** `https://integrations.staging.bgl360.com.au/u/oauth/authorize`, as shown in the Developer Portal (T02).
+2. Does `/oauth/token` accept RFC 6749 form-encoded bodies with the client credentials in the body? Is `scope` required on the token call? **Answered by testing (T03/T04):** form bodies work, but only with the credentials in a Basic header; credentials in the body get 401. `scope` is required: without it the call gets 400 `invalid_scope`.
 3. Do you rotate refresh tokens, and what happens if an old refresh token is reused? Does refreshing extend the refresh token's 30-day expiry (sliding), or is it fixed from first consent? Can the refresh response include `refresh_token_expires_at`, as the code exchange does?
 4. Can an **Owner Application** subscribe to webhooks? Is Audit the only SF360 message type?
 5. The webhook docs list `documentChange` with sub-types in one place, and `newDocument`/`deleteDocument`/`newStatus`/`newAttachment` in another. Which `eventType` values are actually sent today?
