@@ -1,7 +1,5 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## What this repo is
 
 A time-boxed **spike**, not a product. It answers one question: what can Power Platform do natively with the BGL SF360 API (OAuth, API calls, webhook signature verification), and what needs Azure (APIM / Functions) in front of it? Every test has an ID **T01–T15**. Code comments, script synopses and the README's test matrix all use these IDs, so keep them when adding or changing tests.
@@ -23,11 +21,7 @@ Everything is PowerShell 7 (`pwsh`), run from `bgl-spike/harness/`. There is no 
 # The sync check runs there WITHOUT -AllowDeployValues, so CI fails if ProxyTargetPrefix or SpikeTestSecret is committed.
 ```
 
-The other harness scripts call real BGL staging and need a BGL app client ID/secret plus an interactive browser consent. Don't run them unless the user asks:
-
-- `Get-BglToken.ps1 -ClientId <id> [-TestAllStyles] [-ManualCode]` (T02/T03/T05): Authorization Code flow on `127.0.0.1:8765`, then tries four token-request styles (`BglDocumented`, `FormBody`, `FormBodyWithScope`, `FormBodyBasicAuth`).
-- `Invoke-BglProbe.ps1 [-WriteTestContactId <id>] [-FinancialYear <yyyy>]` (T06/T13–T15): uses the saved token (refuses to run once it has expired) and about 15 calls against a 100-per-10-minutes limit. `Invoke-Probe` returns `{ Status, Json }`. Writes to Production are blocked unless `-AllowProductionWrite` is passed, and the write test asks for confirmation (`-Confirm:$false` skips it). The write test builds its PUT body from the fields BGL's PUT table allows for the contact's `contactType` (`ConvertTo-BglContactUpdate`), sends it as UTF-8 bytes, then compares the *whole* record before and after, ignoring `entityRelationships` order (`Compare-BglRecord`). Date filters are sent as `yyyy-MM-dd'T'HH:mm:ss'Z'`. BGL documents that format for `updatedAfter`; for `modifiedAfter` it says only "UTC Time", so the same format is assumed. The PUT body maps full state names to codes and reformats dates to PUT's formats. `Compare-BglRecord` reports each changed field with before and after values, and flags an `address.addressId`-only change as harmless. Never echo a GET record back: GET returns read-only fields and masks `tfn` as `Provided`. BGL doesn't document whether PUT clears omitted fields, so T13 needs a throwaway contact.
-- `Send-BglTestWebhook.ps1 -Url <url> -Secret spike-test-secret -ClientCode spike [-Tamper All]`: webhook simulator.
+The other harness scripts (`Get-BglToken.ps1`, `Invoke-BglProbe.ps1`, `Send-BglTestWebhook.ps1`) call real BGL staging and need a BGL app client ID/secret plus an interactive browser consent. Don't run them unless the user asks. Their parameters and behaviour are in `bgl-spike/harness/CLAUDE.md`. `Invoke-BglProbe.ps1` blocks writes to Production unless `-AllowProductionWrite` is passed. Never echo a GET record back in a PUT: GET returns read-only fields and masks `tfn` as `Provided`. BGL doesn't document whether PUT clears omitted fields, so T13 needs a throwaway contact.
 
 Connector deployment (`pac connector create/update` with the three `connector/` files) is in README Part B.
 
@@ -63,4 +57,6 @@ These come from BGL's Postman collection (github.com/BGLCorp/bgl-api-doc) and ar
 - Only the Authorization Code grant is available. BGL documents token parameters in the **query string** with a **Basic** header. T03/T04 showed it also accepts them in a form body, but only with the client credentials in the Basic header, and `scope` is required (400 `invalid_scope` without it). The generic Power Platform OAuth provider falls back to a Basic header by itself but never sends `scope`, so `tokenUrlTemplate` and `refreshUrlTemplate` in `apiProperties.json` carry `?scope=smsf_partner`. Keep that query string in step with the `scopes` array.
 - Multiple scopes are separated by a literal `+` in both the authorize and token URLs. In `Get-BglToken.ps1`, `$scopeQuery` builds that for query strings and `$scopeForm` (space-separated) gives the same wire bytes in form bodies.
 - Access tokens last 7 days and refresh tokens 30 days, so an idle connection dies after 30 days.
+- The rate limit is 100 calls per 10 minutes.
+- Date filters are sent as `yyyy-MM-dd'T'HH:mm:ss'Z'`. BGL documents that format for `updatedAfter`; for `modifiedAfter` it says only "UTC Time", so the same format is assumed.
 - Webhooks are registered per app in the BGL Developer Portal against a fixed URL. There is no subscribe API, so a native connector webhook trigger isn't possible. SF360 sends only the Audit event, so detecting client changes means polling.
