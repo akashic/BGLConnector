@@ -26,8 +26,10 @@ provenance:
     BGL Postman collection (github.com/BGLCorp/bgl-api-doc, docs/api-doc.json) "Obtain an Access
     Token" vs "Refresh an Access Token" example responses; review rounds 4 (C1) and 5 (C1, C3);
     commits 35b0ed5 and ddd7858; T05 simulation against four mock behaviours (journal round 5 entry)
+    ; live T05 run against BGL staging on 2026-10-26 returned Inconclusive (existing token returned)
+    for both working styles, as predicted (commit daf016d, bgl-spike/README.md test matrix)
   author:
-related: []
+related: [2026-10-26-0336-bgl-refresh-invalidates-previous-refresh-token]
 proposed_tags: []
 ---
 
