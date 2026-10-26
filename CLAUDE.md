@@ -2,7 +2,7 @@
 
 ## What this repo is
 
-A time-boxed **spike**, not a product. It answers one question: what can Power Platform do natively with the BGL SF360 API (OAuth, API calls, webhook signature verification), and what needs Azure (APIM / Functions) in front of it? Every test has an ID **T01–T16**. Code comments, script synopses and the README's test matrix all use these IDs, so keep them when adding or changing tests.
+A time-boxed **spike**, not a product. It answers one question: what can Power Platform do natively with the BGL SF360 API (OAuth, API calls, webhook signature verification), and what needs Azure (APIM / Functions) in front of it? Every test has an ID **T01–T17**. Code comments, script synopses and the README's test matrix all use these IDs, so keep them when adding or changing tests.
 
 `bgl-spike/README.md` is the source of truth: run order, test matrix, decision guide and open questions for BGL. The root `README.md` is a short overview that links to it; keep detail in the runbook, not the overview.
 
@@ -21,30 +21,41 @@ Everything is PowerShell 7 (`pwsh`), run from `bgl-spike/harness/`. There is no 
 # The sync check runs there WITHOUT -AllowDeployValues, so CI fails if ProxyTargetPrefix or SpikeTestSecret is committed.
 ```
 
+The Azure receiver (`bgl-spike/receiver/`, .NET 10 isolated Functions) has its own build and tests:
+
+```powershell
+dotnet test bgl-spike/receiver/tests/BglWebhookReceiver.Tests/BglWebhookReceiver.Tests.csproj   # includes BGL's worked example
+az bicep build --file bgl-spike/receiver/infra/main.bicep --stdout > $null
+# CI: .github/workflows/receiver.yml (paths: bgl-spike/receiver/**) builds, tests, lints Bicep and uploads receiver.zip.
+# Its deploy job runs only from workflow_dispatch with "deploy" ticked, through OIDC and the GitHub `dev` environment.
+```
+
 The other harness scripts (`Get-BglToken.ps1`, `Invoke-BglProbe.ps1`, `Send-BglTestWebhook.ps1`) call real BGL staging and need a BGL app client ID/secret plus an interactive browser consent. Don't run them unless the user asks. Their parameters and behaviour are in `bgl-spike/harness/CLAUDE.md`. `Invoke-BglProbe.ps1` blocks writes to Production unless `-AllowProductionWrite` is passed. Never echo a GET record back in a PUT: GET returns read-only fields and masks `tfn` as `Provided`. BGL doesn't document whether PUT clears omitted fields, so T13 needs a throwaway contact.
 
 Connector deployment (`pac connector create/update` with the three `connector/` files) is in README Part B.
 
 ## Architecture
 
-There are two independent implementations of the same BGL logic. They have to agree with each other.
+There are three independent implementations of the BGL signature logic. They have to agree with each other.
 
 - **`harness/BglSpike.psm1`**: the shared module that every harness script imports. It holds the environment URLs (`Get-BglEnvironment`; the staging authorize URL was confirmed by T02), HMAC signing and verification, the Basic auth header, and token and result persistence. Tokens are written in plain text to `bgl-spike/.secrets/` and results to `bgl-spike/results/*.json`. Both locations are git-ignored.
 - **`connector/`**: a Power Platform custom connector.
   - `apiDefinition.swagger.json` defines real BGL GET operations, which pass straight through to `api.staging.bgl360.com.au`, plus fake `/spike/*` POST operations that custom code handles and never sends to BGL.
   - `apiProperties.json` holds the generic `oauth2` provider settings. `clientId` is the placeholder `REPLACE_WITH_BGL_CLIENT_ID`. `scriptOperations` lists the operations routed to code.
   - `script.csx` (core, documented APIs only) and `script-with-proxy.csx` (core plus the undocumented `Context.CreateNotificationUri` / `OriginalRequestUri`, copied from the DocuSign and Zellis certified connectors). The proxy file is a superset of the core one, so **core changes must be made in both files**.
+- **`receiver/`**: the Azure Function that receives BGL's webhook (README Part D), since a flow trigger can't (T08, T11). `BglSignature.cs` ports the `.csx` `Verify`/`ComputeSignature`, but signs the raw body bytes. `WebhookProcessor` checks the configuration, the signature, the body, then de-duplicates (`TableEventStore`, firm + `eventId`) and forwards (`HttpEventForwarder`, to Flow D). Every non-200 is reported to Flow E (`HttpErrorReporter`). There's no Application Insights. Secrets and flow URLs are Key Vault references. `ConfiguredValue.IsSet` treats an unresolved reference (the literal `@Microsoft.KeyVault(...)` text) as unset, because otherwise that public string would become the HMAC secret. The signed URL is `Bgl__ReceiverBaseUrl` (set by Bicep from the app's host name) plus the request's raw query string, which carries the function key.
 
 Cross-file invariants (`Test-ConnectorSync.ps1` checks the first two, and that the deploy-time constants `ProxyTargetPrefix`/`SpikeTestSecret` are empty unless `-AllowDeployValues` is passed. It also checks that every `/spike/*` operation is in `scriptOperations`. A missing one makes the platform forward that call, with its secret and the user's BGL token, to BGL instead of running the code):
 
 - The swagger `operationId`, the `scriptOperations` entry in `apiProperties.json`, and `KnownOperations` plus the `switch` in **both** `.csx` files.
 - Everything between `// ===== BEGIN SHARED` and `// ===== END SHARED =====` must be identical in both `.csx` files. Put proxy-only code outside that block.
 - The proxy only forwards to a target with the same host and path as the `ProxyTargetPrefix` constant (`IsAllowedTarget`), which must be set to Flow B's trigger URL before deploying. A host allow-list is not enough, because `*.logic.azure.com` and `*.api.powerplatform.com` are shared by every tenant.
-- The signature algorithm in `BglSpike.psm1` (`Get-BglSignature` / `Test-BglAuthorizationHeader`) and in the `.csx` (`ComputeSignature` / `Verify`). Both are checked against BGL's published worked example: T01 in the harness and `SpikeSelfTest` in the connector. If you change one, the shared test vector must still pass in both.
+- The signature algorithm in `BglSpike.psm1` (`Get-BglSignature` / `Test-BglAuthorizationHeader`), in the `.csx` (`ComputeSignature` / `Verify`) and in `receiver/…/BglSignature.cs`. All three are checked against BGL's published worked example: T01 in the harness, `SpikeSelfTest` in the connector, and `BglSignatureTests` in the receiver. If you change one, the shared test vector must still pass in all three.
+- The three roles in `receiver/infra/modules/functionApp.bicep` and `$AssignableRoles` in `receiver/scripts/Setup-GitHubOidc.ps1`. The pipeline's identity may assign only those roles, so a new role needs both changed.
 
 ## BGL webhook signature facts that are easy to break
 
-- Header: `{clientCode} {UTC timestamp yyyy-MM-ddTHH:mm:ss.fffZ} {Base64 HMAC-SHA256(secret, timestamp + "POST" + fullUrl + rawBody)}`. The client code is lowercased. Both implementations trim the header and split on single spaces only (tabs or double spaces are rejected), and T01 checks that.
+- Header: `{clientCode} {UTC timestamp yyyy-MM-ddTHH:mm:ss.fffZ} {Base64 HMAC-SHA256(secret, timestamp + "POST" + fullUrl + rawBody)}`. The client code is lowercased. All three implementations trim the header and split on single spaces only (tabs or double spaces are rejected), and T01 checks that.
 - The signature covers the **exact raw body bytes** and the **full URL including its query string**, such as the `sig=` on a Power Automate trigger URL. Re-serialising JSON, or verifying against a URL without its query string, will fail verification. T01 deliberately tests both cases.
 - Comparisons are constant-time. There is a ±300 s timestamp skew window (`MaxSkewSeconds`, 0 disables it). There is no replay protection: a captured header and body verify again within that window, so a real receiver must deduplicate on `eventId`.
 - Flow run history shows action inputs and outputs. Anything carrying the real secret, the BGL header or the trigger URL needs Secure inputs/outputs, and the real secret belongs in a Key Vault-backed environment variable (README Part C).

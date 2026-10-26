@@ -1,0 +1,14 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+
+    "Bgl__ReceiverBaseUrl": "http://localhost:7071/api/bgl/webhook",
+    "Bgl__WebhookSecret": "spike-test-secret",
+    "Bgl__ExpectedClientCode": "spike",
+    "Bgl__ExposeRejectionReason": "true",
+    "Bgl__AuditForwardUrl": "",
+    "Bgl__ErrorReportUrl": ""
+  }
+}

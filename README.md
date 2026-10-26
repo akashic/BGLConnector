@@ -42,9 +42,10 @@ The spike tests the same questions from two sides, so a failure can be traced to
 
 - **Harness** (`bgl-spike/harness/`): PowerShell 7 scripts that call BGL directly, with no Power Platform involved. They run the OAuth flow and try four token-request styles, probe which endpoints the granted scope reaches, test BGL's webhook signature, and simulate signed BGL webhooks, including a tamper suite.
 - **Spike connector** (`bgl-spike/connector/`): a Power Platform custom connector. It has pass-through operations for real BGL endpoints and custom C# code for signature validation, diagnostics, and an optional notification-proxy pattern.
-- **Test flows**: two small Power Automate flows you build by hand. One receives and verifies webhooks; the other is the target for the proxy pattern.
+- **Test flows**: small Power Automate flows you build by hand: webhook inspection, the proxy target, an hourly audit poller, and the handlers the receiver calls.
+- **Webhook receiver** (`bgl-spike/receiver/`): an Azure Function (Flex Consumption, Bicep, GitHub Actions with OIDC) that verifies BGL's signed webhook and hands it to a flow. It's needed because a flow trigger can't receive BGL's webhook itself (T08, T11).
 
-Every test has an ID from **T01 to T15**. Each records a result in the test matrix, and the results feed a decision guide on whether to use native connectors, APIM, or an Azure Function.
+Every test has an ID from **T01 to T17**. Each records a result in the test matrix, and the results feed a decision guide on whether to use native connectors, APIM, or an Azure Function.
 
 ## Repository layout
 
@@ -52,7 +53,7 @@ Every test has an ID from **T01 to T15**. Each records a result in the test matr
 .
 ├── README.md                  This overview
 ├── CLAUDE.md                  Guidance for AI coding agents working in this repo
-├── .github/workflows/         CI: runs the offline checks on pushes and pull requests (skips docs-only changes)
+├── .github/workflows/         CI: offline checks (skips docs-only changes); receiver build, test and manual deploy
 ├── docs/
 │   ├── guides/                Reusable guides, e.g. testing a custom connector with paconn
 │   ├── journal/               Dated session notes
@@ -62,6 +63,7 @@ Every test has an ID from **T01 to T15**. Each records a result in the test matr
     ├── harness/               PowerShell 7 test scripts and shared module
     ├── connector/             Custom connector definition, OAuth settings and C# custom code
     ├── compile-check/         .NET project that compiles the connector code locally
+    ├── receiver/              Azure Function webhook receiver: code, tests, Bicep, OIDC setup script
     └── results/               Test output (git-ignored)
 ```
 

@@ -38,7 +38,7 @@ Fill in the Result column of the test matrix as you go.
 1. **Validate before deploying** whenever the connector definition changes: [Testing a custom connector with paconn](docs/guides/paconn-connector-testing.md), §4.
 2. **Core connector (C1–C4): deployed; T04, T07 and T08 pass.** T08 passed only with the header renamed: a flow trigger rejects BGL's `Authorization` header.
 3. **T11 failed:** a flow re-serialises the JSON body, so BGL's newline layout no longer verifies. A flow can't verify BGL webhooks from its own trigger.
-4. **Detecting a fund going to audit:** *Send to Audit* only sends the Audit webhook, once BGL enables your app (open question 4: ask BGL). Meanwhile, **T16** polls workflow job stages hourly (Flow C) with no Azure needed. An Azure Function receiver for the webhook is on hold until BGL answers. The connector proxy (T09/T10) is on hold too: it relies on undocumented platform calls.
+4. **Detecting a fund going to audit:** *Send to Audit* only sends the Audit webhook, once BGL enables your app (open question 4: ask BGL). **T16** polls workflow job stages hourly (Flow C), with no Azure needed. **T17** tests the Azure receiver (runbook Part D: deploy from a laptop, or GitHub Actions) with the simulator; T12 then registers it with BGL. The connector proxy (T09/T10) was skipped.
 5. **Before any real BGL traffic (T12):** turn on Secure inputs/outputs on the flow steps and keep the real webhook secret in a Key Vault-backed environment variable (runbook Part C).
 
 ## 4. Record the results and decide

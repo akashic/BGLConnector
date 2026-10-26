@@ -1,7 +1,7 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-  T08, T10, T11 - Simulates BGL sending a signed webhook, so receivers can be tested without BGL.
+  T08, T10, T11, T17 - Simulates BGL sending a signed webhook, so receivers can be tested without BGL.
 
 .DESCRIPTION
   Builds a message in BGL's documented format, signs it exactly as BGL describes, and POSTs the
@@ -39,7 +39,9 @@ param(
     # top-level field. Run T11 with both: Flow A re-serialises the body, which compact JSON survives
     # but BGL's layout may not.
     [ValidateSet('Compact', 'Bgl')][string]$BodyStyle = 'Compact',
-    [ValidateSet('None', 'Body', 'Signature', 'Timestamp', 'Url', 'ClientCode', 'All')][string]$Tamper = 'None',
+    # Replay sends the same signed message twice: a receiver that de-duplicates on eventId (the Azure receiver, T17)
+    # accepts both but forwards once, and reports "duplicate":true on the second when it exposes reasons.
+    [ValidateSet('None', 'Body', 'Signature', 'Timestamp', 'Url', 'ClientCode', 'Replay', 'All')][string]$Tamper = 'None',
     # Header that carries BGL's signature. BGL itself always uses Authorization; see the description.
     [ValidatePattern('^[A-Za-z0-9-]+$')][string]$HeaderName = 'Authorization'
 )
@@ -88,25 +90,28 @@ function Send-One {
         'Signature' { $p = $auth -split ' '; $auth = "$($p[0]) $($p[1]) $([Convert]::ToBase64String([byte[]](1..32)))" }
     }
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($sentBody)
+    $send = { Invoke-WebRequest -Method Post -Uri $Url -Body $bytes -ContentType 'application/json' `
+        -Headers @{ $HeaderName = $auth } -SkipHttpErrorCheck }
+    if ($Case -eq 'Replay') { & $send | Out-Null }   # the first copy; the second is the one reported
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $r = Invoke-WebRequest -Method Post -Uri $Url -Body $bytes -ContentType 'application/json' `
-        -Headers @{ $HeaderName = $auth } -SkipHttpErrorCheck
+    $r = & $send
     $sw.Stop()
-    $expectReject = $Case -ne 'None'
+    $expectReject = $Case -notin 'None', 'Replay'
     $accepted = [int]$r.StatusCode -lt 300
     [pscustomobject]@{
         Case = $Case; Status = [int]$r.StatusCode; Ms = $sw.ElapsedMilliseconds
         Expected = if ($expectReject) { 'reject' } else { 'accept' }
-        Outcome = if ($accepted -ne $expectReject) { 'AS EXPECTED' } else { 'UNEXPECTED' }
+        # 202 means the receiver queued the message without a verdict (e.g. a flow with no Response action).
+        Outcome = if ([int]$r.StatusCode -eq 202) { 'NO VERDICT' } elseif ($accepted -ne $expectReject) { 'AS EXPECTED' } else { 'UNEXPECTED' }
         Response = ($r.Content | Out-String).Trim() -replace '\s+', ' ' | ForEach-Object { $_.Substring(0, [math]::Min(160, $_.Length)) }
         AuthorizationSent = $auth
     }
 }
 
-$cases = if ($Tamper -eq 'All') { 'None', 'Body', 'Signature', 'Timestamp', 'Url', 'ClientCode' } else { @($Tamper) }
+$cases = if ($Tamper -eq 'All') { 'None', 'Body', 'Signature', 'Timestamp', 'Url', 'ClientCode', 'Replay' } else { @($Tamper) }
 $out = foreach ($c in $cases) { Send-One -Case $c }
 foreach ($o in $out) {
-    $colour = if ($o.Outcome -eq 'AS EXPECTED') { 'Green' } else { 'Red' }
+    $colour = switch ($o.Outcome) { 'AS EXPECTED' { 'Green' } 'NO VERDICT' { 'Yellow' } default { 'Red' } }
     Write-Host ("{0,-10} HTTP {1,3}  {2,5}ms  expected {3,-6}  {4}  {5}" -f $o.Case, $o.Status, $o.Ms, $o.Expected, $o.Outcome, $o.Response) -ForegroundColor $colour
 }
 Write-Host 'Note: a receiver that only logs (no verification) will accept everything - that is expected for T11 inspection runs.' -ForegroundColor DarkGray

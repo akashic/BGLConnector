@@ -7,8 +7,9 @@ It has three parts:
 - **Harness** (`harness/`): PowerShell 7 scripts that test BGL directly, with no Power Platform involved.
 - **Spike connector** (`connector/`): a custom connector that tests the same things from inside Power Platform.
 - **Test flows**: small Power Automate flows you build by hand (steps below).
+- **Receiver** (`receiver/`): an Azure Function that receives BGL's webhook, because a flow can't (Part D).
 
-Every test has an ID (T01–T16). Fill in the Result column as you go.
+Every test has an ID (T01–T17). Fill in the Result column as you go.
 
 ---
 
@@ -229,9 +230,113 @@ Detects funds going to audit without webhooks or Azure, by polling workflow job 
 
 The first run reports every job that is already waiting. To avoid that, run it once with the business action turned off, then turn it on.
 
-**T12 (real BGL traffic):** BGL can't call a flow trigger directly (see Flow A), so T12 needs either the proxy URL, if T10 passed, or a fixed receiver in Azure that moves BGL's header out of `Authorization`. Register that URL against the **Audit** message type in the staging Developer Portal. Wait for BGL approval, then use *Send to Audit* on a staging fund in SF360.
+**T12 (real BGL traffic):** BGL can't call a flow trigger directly (see Flow A), so T12 uses the Azure receiver (Part D) and its steps. The proxy route (T09/T10) was skipped. Register that URL against the **Audit** message type in the staging Developer Portal. Wait for BGL approval, then use *Send to Audit* on a staging fund in SF360.
 
 BGL signs the exact URL it calls, so the URL you register and the URL the receiver verifies against must match character for character. Power Automate trigger URLs aren't stable: Microsoft moved them to a new format (old URLs stopped working on 30 November 2025) and from June 2026 can include a scale-unit segment (`/direct/cu/<n>/workflows/...`). They can also be longer than 255 characters, so check that the BGL portal accepts the full URL. Whenever the trigger URL changes, update both the BGL registration and the variable. This fragility is another argument for a fixed receiver (see Decision guide).
+
+### Part D: Azure receiver for the Audit webhook (T17, T12)
+
+A flow trigger can't receive BGL's webhook (T08, T11), so an Azure Function in `receiver/` does: BGL calls the Function, and the Function calls a flow. It follows an existing Flex Consumption Function's patterns (Bicep, managed identity, no storage keys), without Application Insights: errors go to a Power Automate endpoint instead.
+
+For each request the Function:
+
+1. reads the raw body (at most 64 KB) whatever its `Content-Type`; BGL's own example sends JSON as `application/x-www-form-urlencoded`;
+2. verifies BGL's signature over the timestamp, the full URL it was called on (including `?code=`) and the exact bytes, failing closed if the secret is missing or its Key Vault reference didn't resolve;
+3. records `firmId` + `eventId` in Table Storage, so a BGL retry or a replayed message is accepted but not handed on twice;
+4. posts the body, byte for byte, to **Flow D** with headers `x-bgl-event-id`, `x-bgl-event-type` and `x-bgl-client-code`, and no `Authorization` header (so no SAS clash);
+5. replies 200 `{"message":"request accepted."}`. Rejections get 401 (signature), 400 (unusable body) or 413 (too large); 500 means it's misconfigured, and 503 means the hand-off failed (the event is forgotten, so BGL's retry can succeed). Every non-200 is posted to **Flow E**.
+
+**Only BGL can call it:** the platform rejects any call without the function key in the URL before the code runs; the code then rejects anything not signed with BGL's secret within ±300 s; and `allowedIpRanges` in `receiver/infra/env/dev.bicepparam` limits callers to BGL's addresses once BGL publishes them (open question 6). Secrets live in Key Vault, read through the Function's managed identity.
+
+**Flow D — "BGL Audit handler"**
+
+1. Trigger: *When an HTTP request is received*, *Who can trigger* **Anyone**. Request body JSON schema: `{"type":"object","properties":{"entityId":{"type":"string"},"eventId":{"type":"string"},"eventType":{"type":"string"},"firmId":{"type":"string"},"tenants":{"type":"array","items":{"type":"object","properties":{"tenantId":{"type":"string"},"tenantType":{"type":"string"}}}},"userId":{"type":"string"}}}`
+2. **Filter array** on `tenants` where `item()?['tenantType']` is equal to `fundCode` (and again for `financialYear`).
+3. The business action, for example an email or Teams message: "Fund `first(body('Filter_array'))?['tenantId']` sent to audit by `userId`". Don't add a Response action: the trigger then replies 202 at once, which the Function treats as success.
+
+**Flow E — "BGL receiver errors"**
+
+1. Trigger: *When an HTTP request is received*, **Anyone**. Schema: `{"type":"object","properties":{"severity":{"type":"string"},"stage":{"type":"string"},"statusReturned":{"type":"integer"},"message":{"type":"string"},"reason":{"type":"string"},"eventId":{"type":"string"},"eventType":{"type":"string"},"invocationId":{"type":"string"},"timestampUtc":{"type":"string"},"version":{"type":"string"},"source":{"type":"string"}}}`
+2. Notify someone, for example only when `severity` is `error`; `warning` covers rejected signatures, which T17 produces on purpose. Reports never contain the header, the body or a secret.
+
+Both trigger URLs are credentials (their `sig`), so they go into Key Vault, not app settings.
+
+#### Deploy from a laptop (spike testing)
+
+Needs PowerShell 7, the Azure CLI (`az bicep install` once), and **Owner** (or Contributor + User Access Administrator) on the resource group, because the template creates role assignments. The .NET 10 SDK is only needed to build the package yourself. Run from the repo root:
+
+```powershell
+# D1. Sign in and create the resource group (Flex Consumption is available in australiaeast)
+az login
+az account set --subscription '<subscription id>'
+$rg = 'rg-bglhook-dev'
+az group create -n $rg -l australiaeast
+
+# D2. Deploy the infrastructure: storage (no keys), Key Vault, the Flex Consumption app and its role assignments
+$out = az deployment group create -g $rg --name bglhook-laptop `
+  --parameters bgl-spike/receiver/infra/env/dev.bicepparam --query properties.outputs -o json | ConvertFrom-Json
+$app = $out.functionAppName.value; $kv = $out.keyVaultName.value; $base = $out.receiverBaseUrl.value
+
+# D3. Let yourself set secrets: Owner doesn't include Key Vault data access under the RBAC model.
+#     Role assignments can take a few minutes to apply.
+$me = az ad signed-in-user show --query id -o tsv
+az role assignment create --role 'Key Vault Secrets Officer' --assignee-object-id $me `
+  --assignee-principal-type User --scope (az group show -n $rg --query id -o tsv)
+
+# D4. Set the secrets. Read-Host keeps the URLs out of your PowerShell history (see the T08 notes).
+az keyvault secret set --vault-name $kv -n bgl-webhook-secret --value 'spike-test-secret'   # simulator secret for T17
+az keyvault secret set --vault-name $kv -n audit-forward-url --value (Read-Host 'Flow D trigger URL' -MaskInput)
+az keyvault secret set --vault-name $kv -n error-report-url --value (Read-Host 'Flow E trigger URL' -MaskInput)
+#     The app caches Key Vault references for up to 24 hours; this documented call makes it fetch them now.
+az rest --method post --url "https://management.azure.com$(az functionapp show -g $rg -n $app --query id -o tsv)/config/configreferences/appsettings/refresh?api-version=2022-03-01"
+
+# D5. Get the package: the latest "Receiver" workflow run's artifact (no .NET SDK needed)...
+gh run download (gh run list --workflow receiver.yml --branch main --status success -L 1 --json databaseId -q '.[0].databaseId') -n receiver
+#     ...or build it yourself with the .NET 10 SDK:
+# dotnet publish bgl-spike/receiver/src/BglWebhookReceiver/BglWebhookReceiver.csproj -c Release -r linux-x64 --self-contained false -o publish-receiver
+# Compress-Archive -Path publish-receiver/* -DestinationPath receiver.zip -Force
+
+# D6. Deploy the code
+az functionapp deployment source config-zip -g $rg -n $app --src receiver.zip
+
+# D7. Check it and build the URL to register with BGL. The key is percent-encoded because BGL signs the URL exactly
+#     as it calls it. Treat $receiverUrl as a secret: it holds the function key.
+Invoke-RestMethod "https://$($out.functionAppHostName.value)/api/health"   # secretConfigured, forwardConfigured, errorReportConfigured: True
+$key = az functionapp function keys list -g $rg -n $app --function-name BglWebhook --query default -o tsv
+$receiverUrl = "${base}?code=$([uri]::EscapeDataString($key))"
+```
+
+**T17** (from `bgl-spike/harness`, with `$receiverUrl` from D7):
+
+```powershell
+./Send-BglTestWebhook.ps1 -Url $receiverUrl -Secret 'spike-test-secret' -ClientCode spike -Tamper All
+./Send-BglTestWebhook.ps1 -Url $receiverUrl -Secret 'spike-test-secret' -ClientCode spike -BodyStyle Bgl
+Invoke-WebRequest -Method Post -Uri $base -Body '{}' -SkipHttpErrorCheck | Select-Object StatusCode   # 401: no function key
+```
+
+Expect every line **AS EXPECTED**: `None` 200; `Body`, `Signature` and `Url` 401 "Signature mismatch"; `Timestamp` 401 "outside +/-300s"; `ClientCode` 401 "Client code mismatch"; `Replay` 200 with `"duplicate":true`; and the `-BodyStyle Bgl` run 200, the layout a flow trigger couldn't verify (T11). Flow D should run three times (the two `None` messages and the first `Replay` copy) and Flow E five times, all `warning` / `signature`.
+
+**T12** (once BGL has enabled your app for *Send to Audit*, open question 4):
+
+1. Generate a new webhook *Auth – Secret key* in the BGL portal (the old one was typed into a shell during T08), and store it: `az keyvault secret set --vault-name $kv -n bgl-webhook-secret --value (Read-Host 'BGL webhook secret' -MaskInput)`, then repeat D4's refresh call.
+2. Set `exposeRejectionReason = false` in `dev.bicepparam` and redeploy (D2).
+3. Register `$receiverUrl` (with `?code=`) against the **Audit** message type and wait for BGL's approval.
+4. Press *Send to Audit* on a staging fund. Flow D should run once; Flow E should stay quiet. Flow D's trigger outputs show `x-bgl-client-code`: put it in `expectedClientCode` and redeploy.
+
+If a key or secret is ever exposed, regenerate the function key (`az functionapp function keys set … --key-name default`) or the BGL secret, and update the registration.
+
+#### Deploy with GitHub Actions
+
+`.github/workflows/receiver.yml` builds, tests and lints on every push that touches `receiver/`, and deploys only when run by hand. It signs in with OIDC, so GitHub stores no Azure secret.
+
+1. Once, as an Owner: `./bgl-spike/receiver/scripts/Setup-GitHubOidc.ps1 -SubscriptionId <id> -ResourceGroup rg-bglhook-dev -GitHubRepository <owner>/<repo> -SetGitHubVariables`. It creates a deployment identity trusted only by the repo's `dev` environment, grants it Contributor plus a role-assignment right limited to the Function's three roles, and gives you Key Vault Secrets Officer.
+2. In the repo's settings, add a required reviewer to the `dev` environment: the repo is public.
+3. *Actions → Receiver → Run workflow*, tick **deploy**. The job runs what-if, deploys the template and the package, and smoke-tests: the new version serves `/api/health`, a call without the key gets 401, and an unsigned call with it gets 401 (500 until the secret is set).
+4. Set the secrets (D3–D4; step 1 already granted D3) and continue from D7.
+
+The laptop and the pipeline deploy the same template to the same resource group, so you can switch between them.
+
+**Tear down:** `az group delete -n rg-bglhook-dev`, then `az keyvault purge -n <vault name>` (soft delete keeps the name for 7 days), and remove the registration in the BGL portal.
 
 ---
 
@@ -247,14 +352,15 @@ BGL signs the exact URL it calls, so the URL you register and the URL the receiv
 | T06 | Which endpoints does the granted scope reach? | `Invoke-BglProbe.ps1` | 200 vs 401/403 per endpoint | (2026-10-26, `smsf_partner`) **200:** user and account details, rate-limit status, fund list, fund details, trustees, fund contacts, fund documents, firm contacts, firm lodgements, workflow jobs. **Workpapers:** 404 "no working papers found for <fund> in 2026" (and 2027): the endpoint is reachable, and the staging fund has none. **CAS 360** companies and documents: 401 "Authentication failed … not authorized to access the resource", so CAS needs its own scope. |
 | T07 | Does HMAC-SHA256 run in the custom code sandbox? | *Spike: signature self-test* action | `pass: true` | **Pass** (2026-10-26). `pass`, `signatureMatches` and `emptySecretRejected` all `true`; the sandbox reproduced BGL's worked example `fcCSdGwSgTXseS5eFWOphImuEM9LT6KjgHfuiPWB48A=`. |
 | T08 | Can a flow verify a signature through the connector action? | Simulator → Flow A with `-HeaderName X-BGL-Authorization` | Valid message accepted; all tamper cases rejected | **Pass, via a renamed header** (2026-10-26). With BGL's `Authorization` header the trigger itself returns 401 `DirectApiRequestHasMoreThanOneAuthorization` before the flow runs: **BGL can't call a flow trigger directly.** With `X-BGL-Authorization`, the action gave the right verdict for all six cases: valid `isValid: true`; `Body`, `Signature` and `Url` "Signature mismatch"; `Timestamp` "Signature valid but timestamp outside +/-300s" (skew 7199.6 s); `ClientCode` "Client code mismatch". Flow A returned HTTP 200 for every case because its Response wasn't conditional, so the simulator flagged the rejects as UNEXPECTED; the verdicts in the response bodies are what count. Without a Response action the trigger returns 202 before the flow runs. |
-| T09 | Can an action create a notification proxy URL? | Proxy variant → *Create notification proxy URL* | Returns `proxyUrl` (or record the save/compile error) | |
-| T10 | Does a proxied webhook keep its Authorization header, body and a verifiable URL? Does the platform reject an edited proxy URL? | Simulator → proxyUrl → Flow B, then the edited-`target` check | Header not replaced, body intact, signature verifies against a known URL; record whether the edited URL was rejected | |
-| T11 | Does `string(triggerBody())` keep the exact bytes BGL signed? | Simulator → Flow A with `-BodyStyle Compact` and `-BodyStyle Bgl`, compare `isValid` | Both verify. If either fails, raw-body fidelity rules out this design. || **Fail** (2026-10-26). Compact body: `isValid: true`. BGL's layout (`-BodyStyle Bgl`): `isValid: false`, "Signature mismatch". The flow parses the JSON body and `string(triggerBody())` re-serialises it compactly, so the newlines BGL signed are lost. A flow can't verify BGL's signature from its own trigger body. |
-| T12 | What does a real BGL Audit webhook look like? Can owner apps register one? | Portal registration of the proxy URL or a fixed receiver, then *Send to Audit* | Message received and verified with the real secret | Not to Flow A: see T08. |
-| T13 | Can client details be written with the granted scope? | Probe `-WriteTestContactId` (throwaway staging contact) | PUT returns 2xx and no field changed (the script lists any that did, with before and after values). BGL's PUT example names `address.suburb` and `phone1` where its table and GET use `city` and `telephone`, so a changed `address.city` may come from that naming. || **Pass** (2026-10-26, `smsf_partner`). On a throwaway staging Individual: `PUT /sf/contacts/{id}` with only the PUT-table fields returned 200 and the updated contact (`abn`, `accountId`, `address`, `birthCountry`, …). A full re-read found no field changed. The scope can write contacts. Rerun with a TFN and a fund link set: both survived a PUT that leaves them out. The only difference was the address: `streetLine2` went from `""` (as saved by the SF360 form) to `null`, and BGL replaced the address row (`addressId` 65909 → 65910). An integration shouldn't use `addressId` as a stable key, and should treat `""` and `null` as equal. |
+| T09 | Can an action create a notification proxy URL? | Proxy variant → *Create notification proxy URL* | Returns `proxyUrl` (or record the save/compile error) || **Skipped.** The Azure receiver (Part D) replaces the proxy, which relies on undocumented platform calls. |
+| T10 | Does a proxied webhook keep its Authorization header, body and a verifiable URL? Does the platform reject an edited proxy URL? | Simulator → proxyUrl → Flow B, then the edited-`target` check | Header not replaced, body intact, signature verifies against a known URL; record whether the edited URL was rejected || **Skipped**, as T09. |
+| T11 | Does `string(triggerBody())` keep the exact bytes BGL signed? | Simulator → Flow A with `-BodyStyle Compact` and `-BodyStyle Bgl`, compare `isValid` | Both verify. If either fails, raw-body fidelity rules out this design. | **Fail** (2026-10-26). Compact body: `isValid: true`. BGL's layout (`-BodyStyle Bgl`): `isValid: false`, "Signature mismatch". The flow parses the JSON body and `string(triggerBody())` re-serialises it compactly, so the newlines BGL signed are lost. A flow can't verify BGL's signature from its own trigger body. |
+| T12 | What does a real BGL Audit webhook look like? Can owner apps register one? | Register the receiver URL (Part D) against Audit, then *Send to Audit* | Flow D receives the event; Flow E stays quiet | Waiting for BGL to enable the app (open question 4). Not to Flow A: see T08. |
+| T13 | Can client details be written with the granted scope? | Probe `-WriteTestContactId` (throwaway staging contact) | PUT returns 2xx and no field changed (the script lists any that did, with before and after values). BGL's PUT example names `address.suburb` and `phone1` where its table and GET use `city` and `telephone`, so a changed `address.city` may come from that naming. | **Pass** (2026-10-26, `smsf_partner`). On a throwaway staging Individual: `PUT /sf/contacts/{id}` with only the PUT-table fields returned 200 and the updated contact (`abn`, `accountId`, `address`, `birthCountry`, …). A full re-read found no field changed. The scope can write contacts. Rerun with a TFN and a fund link set: both survived a PUT that leaves them out. The only difference was the address: `streetLine2` went from `""` (as saved by the SF360 form) to `null`, and BGL replaced the address row (`addressId` 65909 → 65910). An integration shouldn't use `addressId` as a stable key, and should treat `""` and `null` as equal. |
 | T14 | Is polling feasible for SF360 changes? | Probe date fields, lodgements `modifiedAfter` | Record which endpoints expose usable change dates or filters | (2026-10-26) **Only lodgements take a change filter**: `/sf/firm/lodgements?modifiedAfter=` returned 200 (whether it filters wasn't checked). Fund records carry no last-modified date (`dateFormed`, `dateOfBirth`, `systemStartDate`, `trustDeedLastModifiedDate`, `windUpDate`), and contacts none either (`dateOfDeath`, `establishmentDate`). Detecting fund or contact changes means paging the full list (`/sf/contacts?offset=&limit=`) and comparing it with the last copy. Workflow jobs are paged (`page`, `size`). |
 | T15 | What are the actual rate limits for the app? | Probe P03 and the headers | Record the 10-minute and daily limits | (2026-10-26) **100 per 10 minutes, 1,000 per day**, as documented. Ordinary responses carry only `x-rate-daily-limit-remaining`; the 10-minute count is visible only from `/client/rateLimitStatus`. The counts fit that call being free. The 10-minute reset came 10 minutes after the probe's first call, so the window appears to start at the first call rather than on the clock. |
 | T16 | Can hourly polling detect a fund going to audit? | Flow C against a staging fund's workflow job moved to *Waiting on auditor* | The first run after the move reports the job once; the next run doesn't report it again | |
+| T17 | Does the Azure receiver verify, de-duplicate and forward BGL-signed messages? | Simulator → receiver URL with `-Tamper All` and `-BodyStyle Bgl` (Part D) | Every case AS EXPECTED, including `Replay` (200, `duplicate`) and BGL's body layout; Flow D runs for valid messages only; Flow E gets the rejections | |
 
 ---
 
@@ -280,12 +386,11 @@ T05 refreshes within minutes of consent, while the access token is still valid. 
 
 **Detecting a fund going to audit:** the *Send to Audit* click reaches you only as the Audit webhook, and only once BGL enables your app (open question 4). Polling workflow job stages (Flow C, T16) needs neither BGL's approval nor Azure. But it sees a job moving to *Waiting on auditor*, not the click, so it depends on staff keeping jobs up to date.
 
-**Webhooks:** registration is a fixed URL per message type, so a **fixed receiver** is needed:
+**Webhooks:** registration is a fixed URL per message type, so a **fixed receiver** is needed. **Chosen: an Azure Function** (Part D, T17):
 
-- An Azure Function or APIM verifies the signature, then hands off through Service Bus to a flow. This is the recommended design.
+- The Function verifies the signature on the raw bytes and the full URL, drops duplicates on `eventId` (BGL retries and replays within the timestamp window), and posts the event to a flow over HTTP. Service Bus between them would survive the flow being down; add it if T12 shows BGL doesn't retry.
 - A flow trigger can't be the registered URL, for two reasons. It rejects BGL's `Authorization` header alongside its own `sig` (T08), and it re-serialises the JSON body, so the bytes BGL signed are gone before the flow can verify them (T11 failed).
-- The only flow-only route left is the connector proxy. Its code reads the raw bytes and forwards them to the flow as a string (`rawBody`), so T11's problem doesn't apply. It works only if T10 shows the proxy URL accepts BGL's `Authorization` header. It still exposes an anonymous URL, though.
-- Either way, the receiver must reject replays. A valid signature can be resent within the timestamp window, and neither the harness nor the connector keeps a replay cache, so deduplicate on `eventId`.
+- The connector proxy (T09/T10) could have avoided Azure, but it relies on undocumented platform calls and an anonymous URL, so it was skipped.
 
 **SF360 change detection:** only Audit is sent for SF360, so client-detail changes need polling, sized against T15's limits (100 calls per 10 minutes, 1,000 per day). Funds and contacts have no last-modified date (T14), so a poller has to page the whole list and compare it with the previous copy. Size the page size and schedule against the number of contacts in the firm. Integrations that only write to BGL don't depend on webhooks at all.
 
@@ -320,7 +425,11 @@ T05 refreshes within minutes of consent, while the access token is still valid. 
 | `connector/apiProperties.json` | OAuth settings and the operations handled by code |
 | `connector/script.csx` | Core custom code, documented APIs only |
 | `connector/script-with-proxy.csx` | Core plus the DocuSign/Zellis notification proxy pattern |
+| `receiver/src/BglWebhookReceiver/` | T17/T12 Azure Function: verifies BGL's webhook, de-duplicates on `eventId`, forwards to Flow D, reports errors to Flow E |
+| `receiver/tests/` | xUnit tests, including BGL's worked example and the T01 cases (CI: `.github/workflows/receiver.yml`) |
+| `receiver/infra/` | Bicep: Flex Consumption app, storage without keys, Key Vault; `env/dev.bicepparam` for the spike |
+| `receiver/scripts/Setup-GitHubOidc.ps1` | Deployment identity and GitHub variables for the workflow's deploy job |
 
 The connector's error handler returns the exception type and message to the caller so spike failures are easy to diagnose. A production connector should log the detail and return a generic error.
 
-**Cleanup:** delete `.secrets/`, the two test flows, the spike connector and its connections, and remove the test webhook registrations from the BGL portal.
+**Cleanup:** delete `.secrets/`, the test flows, the receiver's resource group (Part D), the spike connector and its connections, and remove the test webhook registrations from the BGL portal.
