@@ -6,9 +6,9 @@ It has three parts:
 
 - **Harness** (`harness/`): PowerShell 7 scripts that test BGL directly, with no Power Platform involved.
 - **Spike connector** (`connector/`): a custom connector that tests the same things from inside Power Platform.
-- **Test flows**: two small Power Automate flows you build by hand (steps below).
+- **Test flows**: small Power Automate flows you build by hand (steps below).
 
-Every test has an ID (T01–T15). Fill in the Result column as you go.
+Every test has an ID (T01–T16). Fill in the Result column as you go.
 
 ---
 
@@ -25,6 +25,7 @@ Source: BGL's Postman collection, [github.com/BGLCorp/bgl-api-doc](https://githu
 | Redirect URIs | Up to 5 per app. `localhost` blocked, `127.0.0.1` allowed | Add the connector's redirect URL *and* `http://127.0.0.1:8765/callback` for the harness. |
 | Webhook registration | **Per app, in the BGL Developer Portal**: you enter a URL against each message type, and BGL must approve it. No subscription API. | A native connector webhook trigger (which needs a subscribe API) is not possible. Receiving needs a fixed URL. |
 | Webhook message types | Audit (**SF360**); New Company, Identity Check, Document Change (all **CAS 360**) | **SF360 only sends the Audit webhook.** Detecting SF360 client changes needs polling. |
+| Send to Audit | A button (*Send To Audit* on the Fund Dashboard, *Notify → Auditor* on Workpapers) that only sends the Audit webhook. It appears only after BGL enables your app, and is aimed at audit apps ([BGL blog](https://blog.api.bgl360.com.au/send-to-audit/)). Its example request has `Content-Type: application/x-www-form-urlencoded` with a JSON body | Nothing is stored that the API can read back, so the click itself can't be polled. Audit status has only a write endpoint (`POST …/audit/changeAuditStatus/`). Workflow job stages such as *Waiting on auditor* can be polled (T16). A receiver must verify the raw bytes whatever the `Content-Type`. |
 | Rate limits | Default 100 requests per 10 min, 1,000 per day. `GET /client/rateLimitStatus` is free | Constrains polling frequency. |
 | Document download | Returns a pre-signed S3 URL valid for 3 minutes | Flows must download immediately. |
 | Owner applications | A firm accessing its own data emails api@bglcorp.com.au for Developer Portal access; staging is optional | The route for an organisation integrating with its own BGL data rather than building a product for other firms. |
@@ -209,6 +210,25 @@ Record which one you saw. Editing a proxy URL only affects requests sent to that
 
 Use `proxyUrl` for T12 only if T10 passed.
 
+**Flow C — "BGL Spike – Audit poller"** (T16)
+
+Detects funds going to audit without webhooks or Azure, by polling workflow job stages every hour. It catches a job moving to *Waiting on auditor*, not the *Send to Audit* click itself, so it only works if staff move the fund's job when they send it. One page of up to 1,000 jobs is one API call, so an hourly run costs about 24 calls a day per 1,000 jobs.
+
+1. **Record of jobs already notified.** Create a Dataverse table *BGL audit notification* with the columns *Job code* (the primary name column), *Fund ID*, *Fund name*, *Stage* and *Notified on* (date and time). A SharePoint list with the same columns also works.
+2. **Trigger:** *Recurrence*, every 1 hour. In the trigger's settings, turn on concurrency control with a degree of parallelism of 1, so runs never overlap.
+3. **Variables:** `page` (integer, 0), `isLast` (boolean, false), `waiting` (array, `[]`). Also `auditStage` (string, `Waiting on auditor`), so a firm that uses a custom stage name can change it in one place.
+4. **Do until** `variables('isLast')` is equal to `true`, with the count limit set to 20:
+   - **BGL SF360 Spike → List workflow jobs**, with Page = `variables('page')` and Page size = `1000`.
+   - **Filter array:** From = `body('List_workflow_jobs')?['content']`, where `item()?['stageName']` is equal to `variables('auditStage')`.
+   - **Apply to each** over `body('Filter_array')`: **Append to array variable** `waiting` with `items('Apply_to_each')`.
+   - **Set variable** `isLast` = `body('List_workflow_jobs')?['last']`, then **Increment variable** `page` by 1.
+5. **Apply to each** over `variables('waiting')`:
+   - **Dataverse → List rows** from *BGL audit notification*, with the filter `<prefix>_jobcode eq '@{items('Apply_to_each_2')?['jobCode']}'` and a row count of 1.
+   - **Condition:** `length(outputs('List_rows')?['body/value'])` is equal to `0`. If yes, this job has just reached the stage: take the business action (an email or Teams message naming `fundName` and `fundId`), then **Add a new row** with the job's details and `utcNow()`.
+6. Optional: when a job leaves the stage, delete its row, so the flow fires again if it comes back.
+
+The first run reports every job that is already waiting. To avoid that, run it once with the business action turned off, then turn it on.
+
 **T12 (real BGL traffic):** BGL can't call a flow trigger directly (see Flow A), so T12 needs either the proxy URL, if T10 passed, or a fixed receiver in Azure that moves BGL's header out of `Authorization`. Register that URL against the **Audit** message type in the staging Developer Portal. Wait for BGL approval, then use *Send to Audit* on a staging fund in SF360.
 
 BGL signs the exact URL it calls, so the URL you register and the URL the receiver verifies against must match character for character. Power Automate trigger URLs aren't stable: Microsoft moved them to a new format (old URLs stopped working on 30 November 2025) and from June 2026 can include a scale-unit segment (`/direct/cu/<n>/workflows/...`). They can also be longer than 255 characters, so check that the BGL portal accepts the full URL. Whenever the trigger URL changes, update both the BGL registration and the variable. This fragility is another argument for a fixed receiver (see Decision guide).
@@ -234,6 +254,7 @@ BGL signs the exact URL it calls, so the URL you register and the URL the receiv
 | T13 | Can client details be written with the granted scope? | Probe `-WriteTestContactId` (throwaway staging contact) | PUT returns 2xx and no field changed (the script lists any that did, with before and after values). BGL's PUT example names `address.suburb` and `phone1` where its table and GET use `city` and `telephone`, so a changed `address.city` may come from that naming. || **Pass** (2026-10-26, `smsf_partner`). On a throwaway staging Individual: `PUT /sf/contacts/{id}` with only the PUT-table fields returned 200 and the updated contact (`abn`, `accountId`, `address`, `birthCountry`, …). A full re-read found no field changed. The scope can write contacts. Rerun with a TFN and a fund link set: both survived a PUT that leaves them out. The only difference was the address: `streetLine2` went from `""` (as saved by the SF360 form) to `null`, and BGL replaced the address row (`addressId` 65909 → 65910). An integration shouldn't use `addressId` as a stable key, and should treat `""` and `null` as equal. |
 | T14 | Is polling feasible for SF360 changes? | Probe date fields, lodgements `modifiedAfter` | Record which endpoints expose usable change dates or filters | (2026-10-26) **Only lodgements take a change filter**: `/sf/firm/lodgements?modifiedAfter=` returned 200 (whether it filters wasn't checked). Fund records carry no last-modified date (`dateFormed`, `dateOfBirth`, `systemStartDate`, `trustDeedLastModifiedDate`, `windUpDate`), and contacts none either (`dateOfDeath`, `establishmentDate`). Detecting fund or contact changes means paging the full list (`/sf/contacts?offset=&limit=`) and comparing it with the last copy. Workflow jobs are paged (`page`, `size`). |
 | T15 | What are the actual rate limits for the app? | Probe P03 and the headers | Record the 10-minute and daily limits | (2026-10-26) **100 per 10 minutes, 1,000 per day**, as documented. Ordinary responses carry only `x-rate-daily-limit-remaining`; the 10-minute count is visible only from `/client/rateLimitStatus`. The counts fit that call being free. The 10-minute reset came 10 minutes after the probe's first call, so the window appears to start at the first call rather than on the clock. |
+| T16 | Can hourly polling detect a fund going to audit? | Flow C against a staging fund's workflow job moved to *Waiting on auditor* | The first run after the move reports the job once; the next run doesn't report it again | |
 
 ---
 
@@ -257,6 +278,8 @@ A token-owning Function is still an option if the 30-day refresh expiry (below) 
 
 T05 refreshes within minutes of consent, while the access token is still valid. A keep-alive depends on what happens when the refresh comes *after* the 7-day access token has expired, which one session can't observe. Treat anything other than a clear `Extended` or `NotExtended` as undecided, and don't choose a keep-alive design until BGL answers open question 3.
 
+**Detecting a fund going to audit:** the *Send to Audit* click reaches you only as the Audit webhook, and only once BGL enables your app (open question 4). Polling workflow job stages (Flow C, T16) needs neither BGL's approval nor Azure. But it sees a job moving to *Waiting on auditor*, not the click, so it depends on staff keeping jobs up to date.
+
 **Webhooks:** registration is a fixed URL per message type, so a **fixed receiver** is needed:
 
 - An Azure Function or APIM verifies the signature, then hands off through Service Bus to a flow. This is the recommended design.
@@ -273,7 +296,7 @@ T05 refreshes within minutes of consent, while the access token is still valid. 
 1. What is the staging authorize URL? **Answered:** `https://integrations.staging.bgl360.com.au/u/oauth/authorize`, as shown in the Developer Portal (T02).
 2. Does `/oauth/token` accept RFC 6749 form-encoded bodies with the client credentials in the body? Is `scope` required on the token call? **Answered by testing (T03/T04):** form bodies work, but only with the credentials in a Basic header; credentials in the body get 401. `scope` is required: without it the call gets 400 `invalid_scope`.
 3. Do you rotate refresh tokens, and what happens if an old refresh token is reused? Does refreshing extend the refresh token's 30-day expiry (sliding), or is it fixed from first consent? Can the refresh response include `refresh_token_expires_at`, as the code exchange does?
-4. Can an **Owner Application** subscribe to webhooks? Is Audit the only SF360 message type?
+4. Can an **Owner Application** subscribe to webhooks? Is Audit the only SF360 message type? Can you enable *Send to Audit* for an app that isn't an audit product, so that the button sends our firm's own app the Audit webhook?
 5. The webhook docs list `documentChange` with sub-types in one place, and `newDocument`/`deleteDocument`/`newStatus`/`newAttachment` in another. Which `eventType` values are actually sent today?
 6. What are the webhook retry policy, delivery timeout and source IP ranges (for allow-listing)?
 7. Is there a change feed or `modifiedAfter` filter for SF360 funds and contacts?

@@ -2,7 +2,7 @@
 
 ## What this repo is
 
-A time-boxed **spike**, not a product. It answers one question: what can Power Platform do natively with the BGL SF360 API (OAuth, API calls, webhook signature verification), and what needs Azure (APIM / Functions) in front of it? Every test has an ID **T01–T15**. Code comments, script synopses and the README's test matrix all use these IDs, so keep them when adding or changing tests.
+A time-boxed **spike**, not a product. It answers one question: what can Power Platform do natively with the BGL SF360 API (OAuth, API calls, webhook signature verification), and what needs Azure (APIM / Functions) in front of it? Every test has an ID **T01–T16**. Code comments, script synopses and the README's test matrix all use these IDs, so keep them when adding or changing tests.
 
 `bgl-spike/README.md` is the source of truth: run order, test matrix, decision guide and open questions for BGL. The root `README.md` is a short overview that links to it; keep detail in the runbook, not the overview.
 

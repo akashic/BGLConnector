@@ -193,6 +193,114 @@
         }
       }
     },
+    "/sf/workflow/jobs": {
+      "get": {
+        "operationId": "ListWorkflowJobs",
+        "summary": "List workflow jobs",
+        "description": "Paged firm workflow jobs with their stage (T16: polling for funds waiting on the auditor). No change filter: page until 'last' is true.",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": true,
+            "type": "integer",
+            "description": "Zero-based page number. BGL: mandatory.",
+            "x-ms-summary": "Page",
+            "default": 0
+          },
+          {
+            "name": "size",
+            "in": "query",
+            "required": true,
+            "type": "integer",
+            "description": "Page size. BGL: mandatory; its example uses 1000.",
+            "x-ms-summary": "Page size",
+            "default": 1000
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "content": {
+                  "type": "array",
+                  "x-ms-summary": "Jobs",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "jobCode": {
+                        "type": "string",
+                        "x-ms-summary": "Job code"
+                      },
+                      "name": {
+                        "type": "string",
+                        "x-ms-summary": "Job name"
+                      },
+                      "fundId": {
+                        "type": "string",
+                        "x-ms-summary": "Fund ID"
+                      },
+                      "fundCode": {
+                        "type": "string",
+                        "x-ms-summary": "Fund code"
+                      },
+                      "fundName": {
+                        "type": "string",
+                        "x-ms-summary": "Fund name"
+                      },
+                      "stageName": {
+                        "type": "string",
+                        "x-ms-summary": "Stage name",
+                        "description": "System stages include 'Waiting on auditor' and 'Audit complete'; firms can add custom ones."
+                      },
+                      "stageCategory": {
+                        "type": "string",
+                        "x-ms-summary": "Stage category",
+                        "description": "INCOMPLETE, IN_PROGRESS, REVIEWING or COMPLETE"
+                      },
+                      "periodStartDate": {
+                        "type": "string",
+                        "x-ms-summary": "Period start date"
+                      },
+                      "dueDate": {
+                        "type": "string",
+                        "x-ms-summary": "Due date"
+                      },
+                      "completedDate": {
+                        "type": "string",
+                        "x-ms-summary": "Completed date"
+                      },
+                      "createTime": {
+                        "type": "string",
+                        "x-ms-summary": "Created"
+                      }
+                    }
+                  }
+                },
+                "last": {
+                  "type": "boolean",
+                  "x-ms-summary": "Last page"
+                },
+                "number": {
+                  "type": "integer",
+                  "x-ms-summary": "Page number"
+                },
+                "totalPages": {
+                  "type": "integer",
+                  "x-ms-summary": "Total pages"
+                },
+                "totalElements": {
+                  "type": "integer",
+                  "x-ms-summary": "Total jobs"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/funds/{fundId}/documents": {
       "get": {
         "operationId": "ListEntityDocuments",
