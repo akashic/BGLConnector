@@ -48,6 +48,7 @@ Cross-file invariants (`Test-ConnectorSync.ps1` checks the first two, and that t
 - The signature covers the **exact raw body bytes** and the **full URL including its query string**, such as the `sig=` on a Power Automate trigger URL. Re-serialising JSON, or verifying against a URL without its query string, will fail verification. T01 deliberately tests both cases.
 - Comparisons are constant-time. There is a ±300 s timestamp skew window (`MaxSkewSeconds`, 0 disables it). There is no replay protection: a captured header and body verify again within that window, so a real receiver must deduplicate on `eventId`.
 - Flow run history shows action inputs and outputs. Anything carrying the real secret, the BGL header or the trigger URL needs Secure inputs/outputs, and the real secret belongs in a Key Vault-backed environment variable (README Part C).
+- A Power Automate HTTP trigger rejects any request carrying both its `sig=` and an `Authorization` header (401 `DirectApiRequestHasMoreThanOneAuthorization`), so BGL can't call a flow directly. Flow A gets the header as `X-BGL-Authorization` from the simulator (`-HeaderName`); real traffic needs the connector proxy (T10) or a receiver in Azure.
 - Redact `sig=` in anything logged or returned (`RedactSig`). Never put a real BGL secret in connector code. `SpikeTestSecret` in `script-with-proxy.csx` must stay empty except for simulator runs.
 
 ## BGL API constraints that drive the design

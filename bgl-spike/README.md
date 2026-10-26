@@ -133,19 +133,21 @@ Build both flows in the dev environment and delete them afterwards. An anonymous
 - turn on **Secure inputs** for the *Validate BGL signature* action, and **Secure outputs** for the trigger and the `Headers`/`BodyAsString` Compose actions (action **Settings → Security**);
 - keep the real secret in an environment variable of type **Secret** backed by Azure Key Vault, read it with the Dataverse *Perform an unbound action* → `RetrieveEnvironmentVariableSecretValue` action (with **Secure outputs** on), and pass that output to the validation action. Secret environment variables aren't offered in the dynamic content picker.
 
-**Flow A — "BGL Spike – Inspector"** (T08, T11, T12)
+**Flow A — "BGL Spike – Inspector"** (T08, T11)
+
+A Power Automate HTTP trigger rejects any request that has both the `sig=` in its URL and an `Authorization` header, with 401 `DirectApiRequestHasMoreThanOneAuthorization`, before the flow runs ([Microsoft](https://learn.microsoft.com/azure/logic-apps/set-up-security-permissions#access-for-inbound-calls-to-request-based-triggers): a request trigger accepts one authorization scheme). BGL always signs in the `Authorization` header, so BGL can't call Flow A directly. The simulator sends the signature as `X-BGL-Authorization` instead (`-HeaderName`), which is what a fixed receiver in front of the flow would do. Flow A therefore tests the validation action and raw-body fidelity, not direct delivery.
 
 1. Trigger: *When an HTTP request is received*. Who can trigger: **Anyone** (spike only). New triggers default to *Any user in my tenant*, which rejects BGL because it can't send an Entra ID token. No JSON schema.
 2. Save, copy the trigger URL, and store it in an environment variable `bgl_spike_trigger_url`. The signature covers the *full* URL, including the `sig` query string.
 3. Compose `Headers` = `triggerOutputs()?['headers']`
 4. Compose `BodyAsString` = `string(triggerBody())`
 5. Action: **BGL SF360 Spike → Validate BGL signature**
-   - Authorization header: `triggerOutputs()?['headers']?['Authorization']`
+   - Authorization header: `triggerOutputs()?['headers']?['X-BGL-Authorization']`
    - URL BGL called: the `bgl_spike_trigger_url` variable
    - Raw body: output of `BodyAsString`
-   - Shared secret: `spike-test-secret` (simulator), or for T12 the real BGL secret from the Key Vault-backed environment variable (see above)
+   - Shared secret: `spike-test-secret`. Never the real BGL secret: Flow A only ever receives simulator traffic.
    - Expected client code: `spike` for the simulator, or the client code BGL assigns
-6. Response: 200 `{"message":"request accepted."}` if `isValid` is true, otherwise 401.
+6. Response: 200 `{"message":"request accepted."}` if `isValid` is true, otherwise 401 with the validation action's output as the body, so the simulator prints the `reason`.
 
 **Flow B — "BGL Spike – Proxy target"** (T09, T10)
 
@@ -162,15 +164,17 @@ Build both flows in the dev environment and delete them afterwards. An anonymous
 Send simulator traffic:
 
 ```powershell
-# T08/T11: straight to the flow trigger (valid message, then the tamper suite)
-./Send-BglTestWebhook.ps1 -Url '<flow A trigger URL>' -Secret 'spike-test-secret' -ClientCode spike
-./Send-BglTestWebhook.ps1 -Url '<flow A trigger URL>' -Secret 'spike-test-secret' -ClientCode spike -Tamper All
+# T08/T11: straight to the flow trigger (valid message, then the tamper suite). -HeaderName is required:
+#   with the default Authorization header the trigger returns 401 DirectApiRequestHasMoreThanOneAuthorization.
+$flowA = '<flow A trigger URL, including ?...&sig=...>'
+./Send-BglTestWebhook.ps1 -Url $flowA -Secret 'spike-test-secret' -ClientCode spike -HeaderName X-BGL-Authorization
+./Send-BglTestWebhook.ps1 -Url $flowA -Secret 'spike-test-secret' -ClientCode spike -HeaderName X-BGL-Authorization -Tamper All
 
 # T11 again with BGL's own body layout (a newline after each field). Flow A re-serialises the body:
 #   compact JSON survives that, BGL's layout may not, so T11 only passes if BOTH verify.
-./Send-BglTestWebhook.ps1 -Url '<flow A trigger URL>' -Secret 'spike-test-secret' -ClientCode spike -BodyStyle Bgl
+./Send-BglTestWebhook.ps1 -Url $flowA -Secret 'spike-test-secret' -ClientCode spike -HeaderName X-BGL-Authorization -BodyStyle Bgl
 
-# T10: through the connector proxy
+# T10: through the connector proxy, with BGL's real header name (the proxy moves it into the body)
 ./Send-BglTestWebhook.ps1 -Url '<proxyUrl>' -Secret 'spike-test-secret' -ClientCode spike
 ```
 
@@ -184,9 +188,25 @@ Also for T10, check whether the platform protects the proxy URL's query string. 
 
 Record which one you saw. Editing a proxy URL only affects requests sent to that edited URL; BGL keeps calling the URL that is registered with it.
 
-**T12 (real BGL traffic):** register Flow A's trigger URL (or the proxy URL, if T10 passed) against the **Audit** message type in the staging Developer Portal. Wait for BGL approval, then use *Send to Audit* on a staging fund in SF360.
+**T09/T10 step by step.** The *Create notification proxy URL* action tests whether a custom connector **action** can call the undocumented `Context.CreateNotificationUri`. This checklist puts step C5 and Flow B in order. Start with the core variant deployed and a working connection (C2–C4).
 
-BGL signs the exact URL it calls, so the registered URL and the `bgl_spike_trigger_url` variable must match character for character. Power Automate trigger URLs aren't stable: Microsoft moved them to a new format (old URLs stopped working on 30 November 2025) and from June 2026 can include a scale-unit segment (`/direct/cu/<n>/workflows/...`). They can also be longer than 255 characters, so check that the BGL portal accepts the full URL. Whenever the trigger URL changes, update both the BGL registration and the variable. This fragility is another argument for a fixed receiver (see Decision guide).
+1. **Create Flow B's trigger.** Add *When an HTTP request is received*, set *Who can trigger* to **Anyone**, save, and copy the trigger URL.
+2. **Pin the proxy to Flow B.** Set `ProxyTargetPrefix` in `script-with-proxy.csx` to the trigger URL up to, but not including, the `?`. Then, from `harness/`, run `./Test-ConnectorCompile.ps1` and `./Test-ConnectorSync.ps1 -AllowDeployValues`.
+3. **Deploy the proxy variant:** `pac connector update --connector-id <id> --script-file ./connector/script-with-proxy.csx`. If the save or compile fails, that's the T09 result: switch back to `script.csx`.
+4. **Run the action.** In a manually triggered flow, add **BGL SF360 Spike → Spike: create notification proxy URL**. Set *Target URL* to Flow B's **full** trigger URL, including `?…&sig=…`, run it once and record `proxyUrl`. The result tells you:
+   - **200 with `proxyUrl`:** T09 passes.
+   - **400 "targetUrl must match ProxyTargetPrefix":** the prefix from step 2 doesn't match the host and path of the target URL.
+   - **500 "Spike custom code error":** `CreateNotificationUri` failed at run time. Record the `errorType` and message as the T09 result.
+5. **Finish Flow B** (steps 3–4 of Flow B above): add the `Diagnostics` Compose and *Validate BGL signature* against `proxyUrl`.
+6. **Send simulator traffic through the proxy:** `./Send-BglTestWebhook.ps1 -Url '<proxyUrl>' -Secret 'spike-test-secret' -ClientCode spike`. Flow B's run history shows the URL the code saw, whether the platform replaced the `Authorization` header, and whether the body arrived intact (T10).
+7. **Try an edited `target`** in `proxyUrl`, as described above, and record which of the three outcomes you get.
+8. **Clean up.** Clear `ProxyTargetPrefix` and `SpikeTestSecret` before committing; the plain `./Test-ConnectorSync.ps1` fails until you do. Delete the test flows: their run history shows trigger URLs and headers.
+
+Use `proxyUrl` for T12 only if T10 passed.
+
+**T12 (real BGL traffic):** BGL can't call a flow trigger directly (see Flow A), so T12 needs either the proxy URL, if T10 passed, or a fixed receiver in Azure that moves BGL's header out of `Authorization`. Register that URL against the **Audit** message type in the staging Developer Portal. Wait for BGL approval, then use *Send to Audit* on a staging fund in SF360.
+
+BGL signs the exact URL it calls, so the URL you register and the URL the receiver verifies against must match character for character. Power Automate trigger URLs aren't stable: Microsoft moved them to a new format (old URLs stopped working on 30 November 2025) and from June 2026 can include a scale-unit segment (`/direct/cu/<n>/workflows/...`). They can also be longer than 255 characters, so check that the BGL portal accepts the full URL. Whenever the trigger URL changes, update both the BGL registration and the variable. This fragility is another argument for a fixed receiver (see Decision guide).
 
 ---
 
@@ -200,12 +220,12 @@ BGL signs the exact URL it calls, so the registered URL and the `bgl_spike_trigg
 | T04 | Does Power Platform's generic OAuth 2.0 provider work with BGL? | Create a connection (C4), run *Get user details* | Connection is created and the action returns 200 | **Pass, with `?scope=smsf_partner` on the token and refresh URLs** (2026-10-26): connection created and *Get user details* returned 200. The provider sends the credentials in the form body (401), then retries with a Basic header. That second attempt is the one that matters, and without the scope in the URL it gets 400 `invalid_scope` (`Empty scope`). |
 | T05 | Does BGL rotate refresh tokens? Does reusing an old one revoke the new one? Does refreshing extend the refresh token's 30-day expiry? | `Get-BglToken.ps1` refresh section | Record rotated, reusable, current-still-valid, `RefreshExpiryExtended`, `RefreshExpiryDeltaSeconds` and `is_new_token`. `RefreshExpiryExtended` is `Extended`, `NotExtended`, or a value starting `Unknown` or `Inconclusive`. Every style is compared with the code exchange's expiry. | (2026-10-26) Rotated: **yes**. Previous refresh token reusable: **no**. Current token still valid after the reuse attempt: **yes**. Expiry: `Inconclusive (existing token returned)` for both styles that worked, so this is undecided. Refreshing also needs the Basic header: the body-credential styles got 401. |
 | T06 | Which endpoints does the granted scope reach? | `Invoke-BglProbe.ps1` | 200 vs 401/403 per endpoint | |
-| T07 | Does HMAC-SHA256 run in the custom code sandbox? | *Spike: signature self-test* action | `pass: true` | |
-| T08 | Can a flow verify a signature through the connector action? | Simulator → Flow A | Valid message accepted; all tamper cases rejected | |
+| T07 | Does HMAC-SHA256 run in the custom code sandbox? | *Spike: signature self-test* action | `pass: true` | **Pass** (2026-10-26). `pass`, `signatureMatches` and `emptySecretRejected` all `true`; the sandbox reproduced BGL's worked example `fcCSdGwSgTXseS5eFWOphImuEM9LT6KjgHfuiPWB48A=`. |
+| T08 | Can a flow verify a signature through the connector action? | Simulator → Flow A with `-HeaderName X-BGL-Authorization` | Valid message accepted; all tamper cases rejected | (2026-10-26) With BGL's `Authorization` header the trigger itself returns 401 `DirectApiRequestHasMoreThanOneAuthorization` ("The request has SAS authentication scheme, 'spike' authorization scheme…") before the flow runs: **BGL can't call a flow trigger directly.** Rerun with `-HeaderName` to test the action. |
 | T09 | Can an action create a notification proxy URL? | Proxy variant → *Create notification proxy URL* | Returns `proxyUrl` (or record the save/compile error) | |
 | T10 | Does a proxied webhook keep its Authorization header, body and a verifiable URL? Does the platform reject an edited proxy URL? | Simulator → proxyUrl → Flow B, then the edited-`target` check | Header not replaced, body intact, signature verifies against a known URL; record whether the edited URL was rejected | |
 | T11 | Does `string(triggerBody())` keep the exact bytes BGL signed? | Simulator → Flow A with `-BodyStyle Compact` and `-BodyStyle Bgl`, compare `isValid` | Both verify. If either fails, raw-body fidelity rules out this design. | |
-| T12 | What does a real BGL Audit webhook look like? Can owner apps register one? | Portal registration and *Send to Audit* | Message received and verified with the real secret | |
+| T12 | What does a real BGL Audit webhook look like? Can owner apps register one? | Portal registration of the proxy URL or a fixed receiver, then *Send to Audit* | Message received and verified with the real secret | Not to Flow A: see T08. |
 | T13 | Can client details be written with the granted scope? | Probe `-WriteTestContactId` (throwaway staging contact) | PUT returns 2xx and no field changed (the script lists any that did, with before and after values). BGL's PUT example names `address.suburb` and `phone1` where its table and GET use `city` and `telephone`, so a changed `address.city` may come from that naming. | |
 | T14 | Is polling feasible for SF360 changes? | Probe date fields, lodgements `modifiedAfter` | Record which endpoints expose usable change dates or filters | |
 | T15 | What are the actual rate limits for the app? | Probe P03 and the headers | Record the 10-minute and daily limits | |
@@ -233,7 +253,7 @@ T05 refreshes within minutes of consent, while the access token is still valid. 
 **Webhooks:** registration is a fixed URL per message type, so a **fixed receiver** is needed:
 
 - An Azure Function or APIM verifies the signature, then hands off through Service Bus to a flow. This is the recommended design.
-- If T10 and T11 both pass, a flow-only design is technically possible. It still exposes an anonymous trigger URL, though.
+- A flow trigger can't be the registered URL: it rejects BGL's `Authorization` header alongside its own `sig` (T08). The only flow-only route left is the connector proxy, if T10 shows the proxy URL accepts the header and T11 passes. It still exposes an anonymous URL, though.
 - Either way, the receiver must reject replays. A valid signature can be resent within the timestamp window, and neither the harness nor the connector keeps a replay cache, so deduplicate on `eventId`.
 
 **SF360 change detection:** only Audit is sent for SF360, so client-detail changes need polling, sized against T15's limits. Integrations that only write to BGL don't depend on webhooks at all.

@@ -9,12 +9,17 @@
 
   Use a throwaway secret for simulator tests - never the real BGL secret.
 
+  A Power Automate HTTP trigger rejects any request that carries both the sig= SAS in its URL and an
+  Authorization header (401 DirectApiRequestHasMoreThanOneAuthorization), before the flow runs. So
+  BGL's header can't reach a flow directly: use -HeaderName to send it under another name, as a fixed
+  receiver in front of the flow would.
+
 .EXAMPLE
   # Valid message to a Power Automate HTTP trigger
-  ./Send-BglTestWebhook.ps1 -Url $flowUrl -Secret 'spike-test-secret' -ClientCode spike
+  ./Send-BglTestWebhook.ps1 -Url $flowUrl -Secret 'spike-test-secret' -ClientCode spike -HeaderName X-BGL-Authorization
 .EXAMPLE
   # Run the full tamper suite
-  ./Send-BglTestWebhook.ps1 -Url $flowUrl -Secret 'spike-test-secret' -ClientCode spike -Tamper All
+  ./Send-BglTestWebhook.ps1 -Url $flowUrl -Secret 'spike-test-secret' -ClientCode spike -HeaderName X-BGL-Authorization -Tamper All
 #>
 [CmdletBinding()]
 param(
@@ -34,7 +39,9 @@ param(
     # top-level field. Run T11 with both: Flow A re-serialises the body, which compact JSON survives
     # but BGL's layout may not.
     [ValidateSet('Compact', 'Bgl')][string]$BodyStyle = 'Compact',
-    [ValidateSet('None', 'Body', 'Signature', 'Timestamp', 'Url', 'ClientCode', 'All')][string]$Tamper = 'None'
+    [ValidateSet('None', 'Body', 'Signature', 'Timestamp', 'Url', 'ClientCode', 'All')][string]$Tamper = 'None',
+    # Header that carries BGL's signature. BGL itself always uses Authorization; see the description.
+    [ValidatePattern('^[A-Za-z0-9-]+$')][string]$HeaderName = 'Authorization'
 )
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'BglSpike.psm1') -Force
@@ -83,7 +90,7 @@ function Send-One {
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($sentBody)
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $r = Invoke-WebRequest -Method Post -Uri $Url -Body $bytes -ContentType 'application/json' `
-        -Headers @{ Authorization = $auth } -SkipHttpErrorCheck
+        -Headers @{ $HeaderName = $auth } -SkipHttpErrorCheck
     $sw.Stop()
     $expectReject = $Case -ne 'None'
     $accepted = [int]$r.StatusCode -lt 300
@@ -103,4 +110,4 @@ foreach ($o in $out) {
     Write-Host ("{0,-10} HTTP {1,3}  {2,5}ms  expected {3,-6}  {4}  {5}" -f $o.Case, $o.Status, $o.Ms, $o.Expected, $o.Outcome, $o.Response) -ForegroundColor $colour
 }
 Write-Host 'Note: a receiver that only logs (no verification) will accept everything - that is expected for T11 inspection runs.' -ForegroundColor DarkGray
-Write-SpikeResult -Data ([ordered]@{ url = ($Url -replace 'sig=[^&]+', 'sig=REDACTED'); eventType = $EventType; bodyStyle = $BodyStyle; results = $out }) -Name 'webhook-sim' | Out-Null
+Write-SpikeResult -Data ([ordered]@{ url = ($Url -replace 'sig=[^&]+', 'sig=REDACTED'); eventType = $EventType; bodyStyle = $BodyStyle; headerName = $HeaderName; results = $out }) -Name 'webhook-sim' | Out-Null
