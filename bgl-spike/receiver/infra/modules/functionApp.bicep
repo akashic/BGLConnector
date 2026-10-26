@@ -12,6 +12,7 @@ param expectedClientCode string
 param maxSkewSeconds int
 param exposeRejectionReason bool
 param allowedIpRanges array
+param flowAuthentication string
 
 // Built-in role definition IDs. Keep in step with $AssignableRoles in scripts/Setup-GitHubOidc.ps1, which limits the
 // pipeline to assigning exactly these.
@@ -156,6 +157,7 @@ resource appSettings 'Microsoft.Web/sites/config@2024-04-01' = {
     Bgl__MaxSkewSeconds: string(maxSkewSeconds)
     Bgl__ExposeRejectionReason: string(exposeRejectionReason)
     Bgl__EventTableName: eventTableName
+    Bgl__FlowAuthentication: flowAuthentication
   }
 }
 

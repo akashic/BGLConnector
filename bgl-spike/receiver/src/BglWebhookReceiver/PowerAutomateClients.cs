@@ -7,8 +7,8 @@ using Microsoft.Extensions.Options;
 namespace BglWebhookReceiver;
 
 /// <summary>
-/// Posts verified events to a Power Automate HTTP trigger. The request carries no Authorization header: the trigger
-/// URL's sig is its credential, and a second scheme would be rejected (DirectApiRequestHasMoreThanOneAuthorization).
+/// Posts verified events to a Power Automate HTTP trigger (Flow D). BGL's Authorization header isn't passed on; the only
+/// credential is the app's own token (FlowAuthHandler) or, in Sas mode, the trigger URL's sig.
 /// </summary>
 public sealed partial class HttpEventForwarder(IHttpClientFactory httpClientFactory, IOptions<ReceiverOptions> options,
     ILogger<HttpEventForwarder> logger) : IEventForwarder
@@ -79,8 +79,9 @@ public sealed partial class HttpErrorReporter(IHttpClientFactory httpClientFacto
                 .PostAsync(options.Value.ErrorReportUrl, content, cancellationToken);
             if (!response.IsSuccessStatusCode) LogReportFailed($"HTTP {(int)response.StatusCode}");
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        catch (Exception ex)
         {
+            // Any failure, including not getting a flow token: reporting must never break processing.
             LogReportFailed(ex.GetType().Name);
         }
     }

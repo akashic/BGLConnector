@@ -86,6 +86,8 @@ jobs:
       RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
       PARAMETERS: bgl-spike/receiver/infra/env/dev.bicepparam
       T17: ${{ inputs.t17 }}
+      # BGL's real client code, once T12 shows it. A secret, so the public run logs mask it.
+      CLIENT_CODE: ${{ secrets.BGL_EXPECTED_CLIENT_CODE }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -101,10 +103,14 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      # dev.bicepparam keeps rejection reasons off, because BGL is registered against this environment. T17 overrides it.
+      # dev.bicepparam keeps rejection reasons off and the client code empty. T17 overrides both with simulator values;
+      # otherwise BGL's client code comes from the environment secret. (Repeated in the next step: arrays don't
+      # survive between steps.)
       - name: What-if
         run: |
-          overrides=(); [[ "$T17" == "true" ]] && overrides=(--parameters exposeRejectionReason=true expectedClientCode=spike)
+          overrides=()
+          if [[ "$T17" == "true" ]]; then overrides=(--parameters exposeRejectionReason=true expectedClientCode=spike)
+          elif [[ -n "$CLIENT_CODE" ]]; then overrides=(--parameters "expectedClientCode=$CLIENT_CODE"); fi
           az deployment group what-if \
             --resource-group "$RESOURCE_GROUP" \
             --parameters "$PARAMETERS" "${overrides[@]}" \
@@ -113,7 +119,9 @@ jobs:
       - name: Deploy infrastructure
         id: infra
         run: |
-          overrides=(); [[ "$T17" == "true" ]] && overrides=(--parameters exposeRejectionReason=true expectedClientCode=spike)
+          overrides=()
+          if [[ "$T17" == "true" ]]; then overrides=(--parameters exposeRejectionReason=true expectedClientCode=spike)
+          elif [[ -n "$CLIENT_CODE" ]]; then overrides=(--parameters "expectedClientCode=$CLIENT_CODE"); fi
           outputs=$(az deployment group create \
             --resource-group "$RESOURCE_GROUP" \
             --name "bglhook-${{ github.run_number }}" \

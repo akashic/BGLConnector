@@ -32,6 +32,10 @@ param maxSkewSeconds int = 300
 @description('Spike only: return rejection reasons in responses so the webhook simulator can report them. Keep false for real traffic.')
 param exposeRejectionReason bool = false
 
+@description('How the Function proves itself to Flows D and E. Entra: a managed-identity token, with both triggers set to "Specific users in my tenant" and the functionPrincipalId output as the allowed user. Sas: no token, triggers set to "Anyone" (only where the Entra option isn\'t offered yet).')
+@allowed(['Entra', 'Sas'])
+param flowAuthentication string = 'Entra'
+
 @description('Inbound IP allow-list (CIDR, e.g. 203.0.113.0/24). Empty = reachable from anywhere, protected by the function key and BGL\'s signature. Fill in from BGL\'s source IP ranges (open question 6) when known.')
 param allowedIpRanges array = []
 
@@ -100,6 +104,7 @@ module functionApp 'modules/functionApp.bicep' = {
     maxSkewSeconds: maxSkewSeconds
     exposeRejectionReason: exposeRejectionReason
     allowedIpRanges: allowedIpRanges
+    flowAuthentication: flowAuthentication
   }
 }
 
@@ -108,3 +113,5 @@ output functionAppHostName string = functionApp.outputs.defaultHostName
 @description('Register this URL with BGL after appending ?code=<function key> (see the runbook, Part D).')
 output receiverBaseUrl string = functionApp.outputs.receiverBaseUrl
 output keyVaultName string = keyVault.outputs.name
+@description('The Function\'s managed identity (object ID): the allowed user on Flow D\'s and Flow E\'s triggers.')
+output functionPrincipalId string = functionApp.outputs.principalId

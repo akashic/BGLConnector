@@ -24,9 +24,10 @@ public sealed class HealthFunction(IOptions<ReceiverOptions> options)
             // Host and path only: the function key is in the query string, which isn't configured here.
             ReceiverBaseUrl: ConfiguredValue.IsSet(o.ReceiverBaseUrl) ? o.ReceiverBaseUrl : null,
             ForwardConfigured: ConfiguredValue.IsSet(o.AuditForwardUrl),
-            ErrorReportConfigured: ConfiguredValue.IsSet(o.ErrorReportUrl)));
+            ErrorReportConfigured: ConfiguredValue.IsSet(o.ErrorReportUrl),
+            FlowAuthentication: o.FlowAuthentication.ToString()));
     }
 }
 
 public sealed record HealthResponse(string Status, string Version, bool SecretConfigured, bool ReceiverUrlConfigured,
-    string? ReceiverBaseUrl, bool ForwardConfigured, bool ErrorReportConfigured);
+    string? ReceiverBaseUrl, bool ForwardConfigured, bool ErrorReportConfigured, string FlowAuthentication);

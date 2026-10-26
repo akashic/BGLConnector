@@ -35,8 +35,32 @@ public sealed class ReceiverOptions
     /// <summary>Optional: the Power Automate HTTP trigger URL that receives error reports (includes its sig).</summary>
     public string? ErrorReportUrl { get; set; }
 
+    /// <summary>How the Function proves itself to Flows D and E. See <see cref="BglWebhookReceiver.FlowAuthentication"/>.</summary>
+    public FlowAuthentication FlowAuthentication { get; set; } = FlowAuthentication.Entra;
+
+    /// <summary>
+    /// Audience of Power Automate's HTTP triggers. Public cloud by default; Microsoft's "Add OAuth authentication for
+    /// HTTP request triggers" lists the other clouds' values. Must match exactly, including the trailing slash.
+    /// </summary>
+    public string FlowAudience { get; set; } = "https://service.flow.microsoft.com/";
+
     /// <summary>Table Storage table that records event IDs already handled.</summary>
     public string EventTableName { get; set; } = "BglEvents";
+}
+
+public enum FlowAuthentication
+{
+    /// <summary>
+    /// A managed-identity token on every call. The flows' triggers are set to "Specific users in my tenant" with this
+    /// app's object ID, so a leaked trigger URL can't start them.
+    /// </summary>
+    Entra,
+
+    /// <summary>
+    /// No token: for triggers set to "Anyone", where the URL's sig is the only credential. A fallback for regions that
+    /// don't offer the trigger's Entra option yet; a sig trigger rejects any request that also has a token (T08).
+    /// </summary>
+    Sas,
 }
 
 public static class ConfiguredValue

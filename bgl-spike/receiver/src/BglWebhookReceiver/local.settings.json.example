@@ -9,6 +9,7 @@
     "Bgl__ExpectedClientCode": "spike",
     "Bgl__ExposeRejectionReason": "true",
     "Bgl__AuditForwardUrl": "",
-    "Bgl__ErrorReportUrl": ""
+    "Bgl__ErrorReportUrl": "",
+    "Bgl__FlowAuthentication": "Sas"
   }
 }

@@ -243,23 +243,25 @@ For each request the Function:
 1. reads the raw body (at most 64 KB) whatever its `Content-Type`; BGL's own example sends JSON as `application/x-www-form-urlencoded`;
 2. verifies BGL's signature over the timestamp, the full URL it was called on (including `?code=`) and the exact bytes, failing closed if the secret is missing or its Key Vault reference didn't resolve;
 3. records `firmId` + `eventId` in Table Storage, so a BGL retry or a replayed message is accepted but not handed on twice;
-4. posts the body, byte for byte, to **Flow D** with headers `x-bgl-event-id`, `x-bgl-event-type` and `x-bgl-client-code`, and no `Authorization` header (so no SAS clash);
+4. posts the body, byte for byte, to **Flow D** with headers `x-bgl-event-id`, `x-bgl-event-type` and `x-bgl-client-code`, signed in as its own managed identity (BGL's header isn't passed on);
 5. replies 200 `{"message":"request accepted."}`. Rejections get 401 (signature), 400 (unusable body) or 413 (too large); 500 means it's misconfigured, and 503 means the hand-off failed (the event is forgotten, so BGL's retry can succeed). Every non-200 is posted to **Flow E**.
 
 **Only BGL can call it:** the platform rejects any call without the function key in the URL before the code runs; the code then rejects anything not signed with BGL's secret within ±300 s; and `allowedIpRanges` in `receiver/infra/env/dev.bicepparam` limits callers to BGL's addresses once BGL publishes them (open question 6). Secrets live in Key Vault, read through the Function's managed identity.
 
+**Only the Function can start the flows:** with `flowAuthentication = 'Entra'` (the default), both flow triggers are set to *Specific users in my tenant* with the Function's managed identity as the only allowed user. The Function sends an Entra token (audience `https://service.flow.microsoft.com/`), and Power Automate checks its tenant and object ID. So a leaked trigger URL can't inject a fake "sent to audit" event into Flow D, bypassing the signature check. The trigger option is still rolling out by region. If yours doesn't offer it, set both triggers to **Anyone** and deploy with `flowAuthentication=Sas` (D2's `$flowAuth`): the URLs' `sig` is then their only protection.
+
 **Flow D — "BGL Audit handler"**
 
-1. Trigger: *When an HTTP request is received*, *Who can trigger* **Anyone**. Request body JSON schema: `{"type":"object","properties":{"entityId":{"type":"string"},"eventId":{"type":"string"},"eventType":{"type":"string"},"firmId":{"type":"string"},"tenants":{"type":"array","items":{"type":"object","properties":{"tenantId":{"type":"string"},"tenantType":{"type":"string"}}}},"userId":{"type":"string"}}}`
+1. Trigger: *When an HTTP request is received*, *Who can trigger* **Specific users in my tenant**, *Allowed users* the Function's object ID (`$appObjectId` from D2, so build the flows after D2). Request body JSON schema: `{"type":"object","properties":{"entityId":{"type":"string"},"eventId":{"type":"string"},"eventType":{"type":"string"},"firmId":{"type":"string"},"tenants":{"type":"array","items":{"type":"object","properties":{"tenantId":{"type":"string"},"tenantType":{"type":"string"}}}},"userId":{"type":"string"}}}`
 2. **Filter array** on `tenants` where `item()?['tenantType']` is equal to `fundCode` (and again for `financialYear`).
 3. The business action, for example an email or Teams message: "Fund `first(body('Filter_array'))?['tenantId']` sent to audit by `userId`". Don't add a Response action: the trigger then replies 202 at once, which the Function treats as success.
 
 **Flow E — "BGL receiver errors"**
 
-1. Trigger: *When an HTTP request is received*, **Anyone**. Schema: `{"type":"object","properties":{"severity":{"type":"string"},"stage":{"type":"string"},"statusReturned":{"type":"integer"},"message":{"type":"string"},"reason":{"type":"string"},"eventId":{"type":"string"},"eventType":{"type":"string"},"invocationId":{"type":"string"},"timestampUtc":{"type":"string"},"version":{"type":"string"},"source":{"type":"string"}}}`
+1. Trigger: *When an HTTP request is received*, **Specific users in my tenant**, with the same allowed user as Flow D. Schema: `{"type":"object","properties":{"severity":{"type":"string"},"stage":{"type":"string"},"statusReturned":{"type":"integer"},"message":{"type":"string"},"reason":{"type":"string"},"eventId":{"type":"string"},"eventType":{"type":"string"},"invocationId":{"type":"string"},"timestampUtc":{"type":"string"},"version":{"type":"string"},"source":{"type":"string"}}}`
 2. Notify someone, for example only when `severity` is `error`; `warning` covers rejected signatures, which T17 produces on purpose. Reports never contain the header, the body or a secret.
 
-Both trigger URLs are credentials (their `sig`), so they go into Key Vault, not app settings.
+Both trigger URLs still go into Key Vault, not app settings: in `Sas` mode they're the only credential.
 
 #### Deploy from a laptop (spike testing)
 
@@ -273,13 +275,17 @@ $rg = 'rg-bglhook-dev'
 az group create -n $rg -l australiaeast
 
 # D2. Deploy the infrastructure: storage (no keys), Key Vault, the Flex Consumption app and its role assignments.
-#     $t17 adds the simulator settings: rejection reasons in responses, and client code 'spike' so the ClientCode
-#     tamper is refused. Set $t17 = $false and repeat D2 before T12; dev.bicepparam alone keeps reasons off.
-$t17 = $true
-$t17Params = if ($t17) { @('--parameters', 'exposeRejectionReason=true', 'expectedClientCode=spike') } else { @() }
+#     These settings are passed at deploy time, not committed (the repo is public):
+$t17 = $true          # T17 simulator settings: reasons in responses, client code 'spike'. $false before T12.
+$clientCode = ''      # T12 step 4: BGL's real client code. Used only when $t17 is $false.
+$flowAuth = 'Entra'   # 'Sas' only if the flow trigger's "Specific users in my tenant" option isn't offered yet.
+$extra = @("flowAuthentication=$flowAuth")
+if ($t17) { $extra += 'exposeRejectionReason=true', 'expectedClientCode=spike' }
+elseif ($clientCode) { $extra += "expectedClientCode=$clientCode" }
 $out = az deployment group create -g $rg --name bglhook-laptop `
-  --parameters bgl-spike/receiver/infra/env/dev.bicepparam @t17Params --query properties.outputs -o json | ConvertFrom-Json
+  --parameters bgl-spike/receiver/infra/env/dev.bicepparam --parameters @extra --query properties.outputs -o json | ConvertFrom-Json
 $app = $out.functionAppName.value; $kv = $out.keyVaultName.value; $base = $out.receiverBaseUrl.value
+$appObjectId = $out.functionPrincipalId.value   # the allowed user on Flows D and E: build them now, before D4
 
 # D3. Let yourself set secrets: Owner doesn't include Key Vault data access under the RBAC model.
 #     Role assignments can take a few minutes to apply.
@@ -320,6 +326,8 @@ $receiverUrl = "${base}?code=$([uri]::EscapeDataString($key))"
 Invoke-WebRequest -Method Post -Uri $base -Body '{}' -SkipHttpErrorCheck | Select-Object StatusCode   # 401: no function key
 ```
 
+If the simulator shows 503 "Hand-off to Power Automate failed: HTTP 401" and Flow E stays quiet, the flows aren't accepting the Function's token. Check that both triggers list `$appObjectId` and that `/api/health` shows `"flowAuthentication":"Entra"`. A trigger still on **Anyone** rejects a token alongside its `sig` (T08).
+
 This needs D2 run with `$t17 = $true` (or the workflow's **t17** input). Without it, every rejection shows no reason and the `ClientCode` case is accepted, because BGL doesn't sign the client code. Expect every line **AS EXPECTED**: `None` 200; `Body`, `Signature` and `Url` 401 "Signature mismatch"; `Timestamp` 401 "outside +/-300s"; `ClientCode` 401 "Client code mismatch"; `Replay` 200 with `"duplicate":true`; and the `-BodyStyle Bgl` run 200, the layout a flow trigger couldn't verify (T11). Flow D should run three times (the two `None` messages and the first `Replay` copy) and Flow E five times, all `warning` / `signature`.
 
 **T12** (once BGL has enabled your app for *Send to Audit*, open question 4):
@@ -327,7 +335,7 @@ This needs D2 run with `$t17 = $true` (or the workflow's **t17** input). Without
 1. Generate a new webhook *Auth – Secret key* in the BGL portal (the old one was typed into a shell during T08), and store it: `az keyvault secret set --vault-name $kv -n bgl-webhook-secret --value (Read-Host 'BGL webhook secret' -MaskInput)`, then repeat D4's refresh call.
 2. Turn off the T17 settings: repeat D2 with `$t17 = $false`, or run the workflow with **t17** unticked. Rejection reasons stop appearing in responses, and the client code check is off until step 4.
 3. Register `$receiverUrl` (with `?code=`) against the **Audit** message type and wait for BGL's approval.
-4. Press *Send to Audit* on a staging fund. Flow D should run once; Flow E should stay quiet. Flow D's trigger outputs show `x-bgl-client-code`: put it in `expectedClientCode` and redeploy.
+4. Press *Send to Audit* on a staging fund. Flow D should run once; Flow E should stay quiet. Flow D's trigger outputs show `x-bgl-client-code`. Don't commit it to `dev.bicepparam`: it may identify your firm, and the repo is public. Instead, set `$clientCode` in D2 and repeat D2, or with GitHub Actions add it as an environment secret `BGL_EXPECTED_CLIENT_CODE` on `dev` (a secret, so the public run logs mask it) and rerun the workflow.
 
 If a key or secret is ever exposed, regenerate the function key (`az functionapp function keys set … --key-name default`) or the BGL secret, and update the registration.
 
@@ -341,7 +349,7 @@ If a key or secret is ever exposed, regenerate the function key (`az functionapp
    - the new version serves `/api/health` (called with the host key);
    - calls to either endpoint without a key get 401;
    - an unsigned call with the key gets 401 (500 until the secret is set).
-3. Set the secrets (D3–D4; step 1 already granted D3) and continue from D7.
+3. Build Flows D and E with the Function's object ID as the allowed user (`az functionapp identity show -g rg-bglhook-dev -n <app> --query principalId -o tsv`). Then set the secrets (D3–D4; step 1 already granted D3) and continue from D7.
 
 The laptop and the pipeline deploy the same template to the same resource group, so you can switch between them.
 
