@@ -28,7 +28,7 @@ provenance:
     refresh section against BGL staging on 2026-10-26 (rotated=True, previous refresh token
     reusable: False, current token still valid afterwards: True)
   author:
-related: [2026-10-14-1645-bgl-refresh-response-cannot-show-sliding-expiry]
+related: [2026-10-14-1645-bgl-refresh-response-cannot-show-sliding-expiry, 2026-10-26-1210-bgl-new-sign-in-revokes-previous-token-for-same-login-and-app]
 proposed_tags: []
 ---
 
@@ -41,7 +41,7 @@ T05 refreshed a BGL staging token with each request style. Every successful refr
 BGL rotates refresh tokens: each refresh replaces the stored grant, and the token that was just used is no longer valid. Its documentation doesn't say this. A Power Platform connection should cope, since it keeps the refresh token returned with each new access token, but that hasn't yet been observed over a real 7-day refresh. Anything that copies or shares a refresh token can't cope.
 
 ## What to do instead
-- Don't share one grant between a Power Platform connection and another client. Give each its own BGL login or BGL app, or let one service own the token. A second consent by the same login to the same app may not help: BGL's `is_new_token` field suggests it can hand back the existing token.
+- Don't share one grant between a Power Platform connection and another client. Give each its own BGL login or BGL app, or let one service own the token. A second consent by the same login to the same app doesn't help: it revokes the first client's access token (see the related lesson on new sign-ins).
 - In a token-owning service, such as a Function with the refresh token in Key Vault, save the new refresh token before using the new access token, and make sure only one refresh runs at a time.
 - Use only the latest token saved under `.secrets/` from harness runs. Earlier copies are dead.
 

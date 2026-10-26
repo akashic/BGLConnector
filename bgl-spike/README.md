@@ -71,6 +71,8 @@ cd harness
 #   Microsoft's consent service, which rejects it ("No consent server information was associated
 #   with this request").
 #   A 401 from every style means BGL rejected the client ID and secret, not the request format.
+#   Signing in here revokes the Power Automate connection's token if both use the same BGL login and app
+#   (and the connection's sign-in revokes this one). Run the harness first, then use Fix connection.
 
 # T06, T14, T15 - which endpoints work with this scope, polling fields, rate limits
 #   Stops if the saved access token has expired (7 days); re-run Get-BglToken.ps1 first.
@@ -243,6 +245,8 @@ BGL signs the exact URL it calls, so the URL you register and the URL the receiv
 - Have an **Azure Function own the BGL token** (refresh token in Key Vault), with the connector calling the Function using Entra ID.
 
 A token-owning Function is still an option if the 30-day refresh expiry (below) can't be managed any other way.
+
+**One live token per BGL login per app.** A new sign-in revokes the previous access token: the harness and the connection, sharing a login, logged each other out (401 `invalid_token`). Each client needs its own BGL login or BGL app. That includes one per Power Platform environment, and any token-owning Function.
 
 **T04 passed, so native connectors work for API calls.** Whether a keep-alive helps depends on T05:
 
