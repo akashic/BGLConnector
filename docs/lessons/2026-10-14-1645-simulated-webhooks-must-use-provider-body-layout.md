@@ -26,7 +26,8 @@ provenance:
     BGL Postman collection (github.com/BGLCorp/bgl-api-doc, docs/api-doc.json) webhook request
     template; review round 3 finding D5; commit 35b0ed5 (Send-BglTestWebhook -BodyStyle Bgl, T11 needs
     both styles); check run: a BGL-style body verified as sent and failed after compact
-    re-serialisation
+    re-serialisation; live T11 run on 2026-10-26 (bgl-spike/README.md test matrix): the same signed
+    message verified with -BodyStyle Compact and failed "Signature mismatch" with -BodyStyle Bgl
   author:
 related: [2026-10-14-1534-power-automate-trigger-url-change-breaks-bgl-signature]
 proposed_tags: []
@@ -36,6 +37,8 @@ When a simulator tests whether a receiver keeps BGL's exact webhook bytes, compa
 
 ## What happened
 T11 asks whether Flow A's `string(triggerBody())` returns the bytes BGL signed. The simulator only ever sent compact JSON. BGL's own webhook template has a newline after every field: `{"entityId":"…",\n"eventId":"…",\n…}`. Power Automate parses the JSON body and `string()` re-serialises it compactly. A compact body comes out byte-identical, so T11 would pass, and the design would then fail at T12 on real traffic.
+
+Confirmed live on 2026-10-26: against Flow A, the compact body verified and BGL's layout failed with "Signature mismatch". A compact-only test would have passed T11.
 
 ## Why it happened
 Re-serialisation is only visible when the input wasn't already in the serialiser's output format. The simulator happened to match the receiver's format, not the provider's.
