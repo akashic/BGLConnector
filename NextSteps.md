@@ -48,7 +48,7 @@ Use the [Decision guide](bgl-spike/README.md#decision-guide) to settle:
 - **API calls:** settled by T04: a native custom connector, with `?scope=` on its token and refresh URLs. No APIM or Function is needed in front of BGL's token endpoint.
 - **Connection lifetime:** a weekly keep-alive flow, or a service that owns the token and re-authorises (T05 plus BGL's answer to question 3).
 - **Webhooks:** most likely a fixed Azure receiver (Function or APIM) that verifies the signature, deduplicates on `eventId` and hands off to a flow. BGL can't call a flow trigger directly: the trigger rejects a request that carries an `Authorization` header as well as its `sig` (T08), and it re-serialises the body BGL signed (T11). The connector proxy (T10), which forwards the raw body as a string, is the only flow-only route left, and trigger URLs that change and can exceed 255 characters make it fragile.
-- **Change detection:** SF360 sends only the Audit webhook, so client changes need polling sized to the measured rate limits (T14/T15).
+- **Change detection:** SF360 sends only the Audit webhook, so client changes need polling. Funds and contacts have no last-modified date (T14), so the poller compares full snapshots, within 100 calls per 10 minutes and 1,000 per day (T15).
 
 Then capture what staging taught you: lessons in `docs/lessons/` (anything that surprised you about BGL or Power Platform) and a journal entry.
 
