@@ -22,31 +22,40 @@ public sealed class WebhookFunction(WebhookProcessor processor, IOptions<Receive
         CancellationToken cancellationToken)
     {
         var request = new WebhookRequest(req.Headers.Authorization.ToString(), req.QueryString.Value, [], context.InvocationId);
-
-        if (req.ContentLength > MaxBodyBytes) return await TooLarge(request, cancellationToken);
-
-        // Read the raw bytes whatever the Content-Type (BGL's own example sends JSON as form-urlencoded). Content-Length
-        // can be absent, so stop once the limit is passed.
-        using var buffer = new MemoryStream();
-        var chunk = new byte[8192];
-        int read;
-        while ((read = await req.Body.ReadAsync(chunk, cancellationToken)) > 0)
+        try
         {
-            buffer.Write(chunk, 0, read);
-            if (buffer.Length > MaxBodyBytes) return await TooLarge(request, cancellationToken);
-        }
+            if (req.ContentLength > MaxBodyBytes) return await TooLarge(request);
 
-        var outcome = await processor.ProcessAsync(request with { Body = buffer.ToArray() }, cancellationToken);
-        return Respond(outcome);
+            // Read the raw bytes whatever the Content-Type (BGL's own example sends JSON as form-urlencoded).
+            // Content-Length can be absent, so stop once the limit is passed. Cancelling here loses nothing: no event
+            // has been recorded yet.
+            using var buffer = new MemoryStream();
+            var chunk = new byte[8192];
+            int read;
+            while ((read = await req.Body.ReadAsync(chunk, cancellationToken)) > 0)
+            {
+                buffer.Write(chunk, 0, read);
+                if (buffer.Length > MaxBodyBytes) return await TooLarge(request);
+            }
+
+            return Respond(await processor.ProcessAsync(request with { Body = buffer.ToArray() }));
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            // Without Application Insights, Flow E is the only place an unexpected failure would show. The type name
+            // only: an exception message could quote a URL or part of the request.
+            return Respond(await processor.FailAsync(500, "Internal error", $"Unhandled {ex.GetType().Name}", "unhandled",
+                request, null));
+        }
     }
 
-    private async Task<IActionResult> TooLarge(WebhookRequest request, CancellationToken cancellationToken)
+    private async Task<IActionResult> TooLarge(WebhookRequest request)
         => Respond(await processor.FailAsync(413, "Payload too large", $"Body over {MaxBodyBytes / 1024} KB", "request",
-            request, null, cancellationToken));
+            request, null));
 
     private ObjectResult Respond(WebhookOutcome outcome)
     {
-        // BGL ignores the body; it reads the status. Reasons and the duplicate flag are for the simulator in the spike.
+        // BGL ignores the body; it reads the status. Reasons and the duplicate flag are for the simulator (T17 only).
         var expose = options.Value.ExposeRejectionReason;
         object body = outcome.StatusCode == 200
             ? expose ? new { message = outcome.Message, duplicate = outcome.Duplicate } : new { message = outcome.Message }

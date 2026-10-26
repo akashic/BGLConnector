@@ -27,7 +27,9 @@ The Azure receiver (`bgl-spike/receiver/`, .NET 10 isolated Functions) has its o
 dotnet test bgl-spike/receiver/tests/BglWebhookReceiver.Tests/BglWebhookReceiver.Tests.csproj   # includes BGL's worked example
 az bicep build --file bgl-spike/receiver/infra/main.bicep --stdout > $null
 # CI: .github/workflows/receiver.yml (paths: bgl-spike/receiver/**) builds, tests, lints Bicep and uploads receiver.zip.
-# Its deploy job runs only from workflow_dispatch with "deploy" ticked, through OIDC and the GitHub `dev` environment.
+# Its deploy job runs only from workflow_dispatch with "deploy" ticked, through OIDC and the GitHub `dev` environment,
+# which Setup-GitHubOidc.ps1 limits to main with a required reviewer. "t17" adds the simulator-only settings
+# (exposeRejectionReason, expectedClientCode=spike) as inline overrides; dev.bicepparam itself keeps reasons off.
 ```
 
 The other harness scripts (`Get-BglToken.ps1`, `Invoke-BglProbe.ps1`, `Send-BglTestWebhook.ps1`) call real BGL staging and need a BGL app client ID/secret plus an interactive browser consent. Don't run them unless the user asks. Their parameters and behaviour are in `bgl-spike/harness/CLAUDE.md`. `Invoke-BglProbe.ps1` blocks writes to Production unless `-AllowProductionWrite` is passed. Never echo a GET record back in a PUT: GET returns read-only fields and masks `tfn` as `Provided`. BGL doesn't document whether PUT clears omitted fields, so T13 needs a throwaway contact.
@@ -57,6 +59,7 @@ Cross-file invariants (`Test-ConnectorSync.ps1` checks the first two, and that t
 
 - Header: `{clientCode} {UTC timestamp yyyy-MM-ddTHH:mm:ss.fffZ} {Base64 HMAC-SHA256(secret, timestamp + "POST" + fullUrl + rawBody)}`. The client code is lowercased. All three implementations trim the header and split on single spaces only (tabs or double spaces are rejected), and T01 checks that.
 - The signature covers the **exact raw body bytes** and the **full URL including its query string**, such as the `sig=` on a Power Automate trigger URL. Re-serialising JSON, or verifying against a URL without its query string, will fail verification. T01 deliberately tests both cases.
+- BGL doesn't sign the client code, so an expected-client-code check only catches a misconfigured registration. The receiver checks it after the signature, so rejection reasons can't reveal the expected code to an unsigned caller.
 - Comparisons are constant-time. There is a ±300 s timestamp skew window (`MaxSkewSeconds`, 0 disables it). There is no replay protection: a captured header and body verify again within that window, so a real receiver must deduplicate on `eventId`.
 - Flow run history shows action inputs and outputs. Anything carrying the real secret, the BGL header or the trigger URL needs Secure inputs/outputs, and the real secret belongs in a Key Vault-backed environment variable (README Part C).
 - A Power Automate HTTP trigger rejects any request carrying both its `sig=` and an `Authorization` header (401 `DirectApiRequestHasMoreThanOneAuthorization`), so BGL can't call a flow directly. A trigger also re-serialises the JSON body, so `string(triggerBody())` loses BGL's newlines and fails verification (T11). Flow A gets the header as `X-BGL-Authorization` from the simulator (`-HeaderName`); real traffic needs the connector proxy (T10) or a receiver in Azure.

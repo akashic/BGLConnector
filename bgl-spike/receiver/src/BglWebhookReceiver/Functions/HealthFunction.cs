@@ -7,11 +7,13 @@ namespace BglWebhookReceiver.Functions;
 
 /// <summary>
 /// Used by the deployment smoke test. Reports the build version and whether each setting resolved, never their values.
+/// Needs a key (the smoke test uses the host key): anonymous, it would tell anyone which settings are missing and run
+/// code, at our cost, for every caller.
 /// </summary>
 public sealed class HealthFunction(IOptions<ReceiverOptions> options)
 {
     [Function("Health")]
-    public IActionResult Run([HttpTrigger(AuthorizationLevel.Anonymous, "get", Route = "health")] HttpRequest req)
+    public IActionResult Run([HttpTrigger(AuthorizationLevel.Function, "get", Route = "health")] HttpRequest req)
     {
         var o = options.Value;
         return new OkObjectResult(new HealthResponse(

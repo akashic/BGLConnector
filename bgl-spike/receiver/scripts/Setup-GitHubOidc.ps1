@@ -16,7 +16,9 @@
           roles the function app needs (infra/modules/functionApp.bicep), and only to service principals.
     - Grants the person who sets the Key Vault secrets (default: you) Key Vault Secrets Officer on the resource group.
       The pipeline never sees secret values.
-    - Optionally creates the GitHub environment and writes its variables with the gh CLI.
+    - Optionally (-SetGitHubVariables) creates the GitHub environment, protects it and writes its variables with the gh
+      CLI. Protection matters because the identity can deploy code that runs as the function app, which can read every
+      Key Vault secret: only -DeployBranch may deploy, and -Reviewer (default: you) approves each run.
 
     Requires the Azure CLI signed in as Owner (or User Access Administrator + Contributor) on the subscription or
     resource group, and the gh CLI signed in with access to the repo (or pass -OidcSubjectPrefix).
@@ -40,7 +42,12 @@ param(
     # Object ID of the person who will set the Key Vault secrets. Default: the signed-in Azure CLI user.
     [string] $SecretsOfficerObjectId,
 
-    [switch] $SetGitHubVariables
+    [switch] $SetGitHubVariables,
+
+    # With -SetGitHubVariables: the GitHub user who approves deployments (default: the gh user) and the only branch
+    # allowed to deploy.
+    [string] $Reviewer,
+    [string] $DeployBranch = 'main'
 )
 
 Set-StrictMode -Version Latest
@@ -136,14 +143,29 @@ $vars = [ordered]@{
     AZURE_RESOURCE_GROUP  = $ResourceGroup
 }
 
-if ($SetGitHubVariables) {
-    gh api --method PUT "repos/$GitHubRepository/environments/$GitHubEnvironment" --silent
+if ($SetGitHubVariables -and $PSCmdlet.ShouldProcess("$GitHubRepository environment '$GitHubEnvironment'", 'Protect and set variables')) {
+    # The federated credential trusts any job in this environment, from any branch, so the environment's own rules are
+    # what stop a pushed branch with an edited workflow from deploying. Self-review stays allowed, so a sole
+    # maintainer can approve their own runs.
+    $reviewerId = if ($Reviewer) { gh api "users/$Reviewer" --jq .id } else { gh api user --jq .id }
+    @{
+        reviewers                = @(@{ type = 'User'; id = [int64]$reviewerId })
+        deployment_branch_policy = @{ protected_branches = $false; custom_branch_policies = $true }
+    } | ConvertTo-Json -Depth 4 | gh api --method PUT "repos/$GitHubRepository/environments/$GitHubEnvironment" --input - --silent
+
+    $policyUrl = "repos/$GitHubRepository/environments/$GitHubEnvironment/deployment-branch-policies"
+    $policies = gh api $policyUrl | ConvertFrom-Json
+    if (-not ($policies.branch_policies | Where-Object { $_.name -eq $DeployBranch -and $_.type -eq 'branch' })) {
+        gh api --method POST $policyUrl -f name=$DeployBranch -f type=branch --silent
+    }
+
     foreach ($kv in $vars.GetEnumerator()) {
         gh variable set $kv.Key --env $GitHubEnvironment --repo $GitHubRepository --body $kv.Value
     }
-    Write-Host "Set variables on GitHub environment '$GitHubEnvironment'. Add a required reviewer to it in the repo settings." -ForegroundColor Green
+    Write-Host "GitHub environment '$GitHubEnvironment': deploys from '$DeployBranch' only, each approved by $(if ($Reviewer) { $Reviewer } else { 'you' }); variables set." -ForegroundColor Green
 }
-else {
-    Write-Host "`nCreate GitHub environment '$GitHubEnvironment' and add these environment variables (identifiers, not secrets):" -ForegroundColor Green
+elseif (-not $SetGitHubVariables) {
+    Write-Host "`nCreate GitHub environment '$GitHubEnvironment' with a required reviewer and deployment branches limited to '$DeployBranch'," -ForegroundColor Green
+    Write-Host "then add these environment variables (identifiers, not secrets):" -ForegroundColor Green
     $vars | Format-Table -HideTableHeaders | Out-String | Write-Host
 }

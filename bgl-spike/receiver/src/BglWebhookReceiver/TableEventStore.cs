@@ -40,12 +40,18 @@ public sealed class TableEventStore(TableClient table) : IEventStore
     /// </summary>
     public static TableClient CreateClient(IConfiguration configuration, TokenCredential credential, string tableName)
     {
+        // The processor doesn't cancel store calls (see WebhookProcessor.ProcessAsync), so bound them here instead of
+        // relying on the SDK's default 100-second network timeout.
+        var options = new TableClientOptions();
+        options.Retry.MaxRetries = 2;
+        options.Retry.NetworkTimeout = TimeSpan.FromSeconds(5);
+
         var serviceUri = configuration["AzureWebJobsStorage:tableServiceUri"];
-        if (!string.IsNullOrEmpty(serviceUri)) return new TableClient(new Uri(serviceUri), tableName, credential);
+        if (!string.IsNullOrEmpty(serviceUri)) return new TableClient(new Uri(serviceUri), tableName, credential, options);
 
         var connectionString = configuration["AzureWebJobsStorage"]
             ?? throw new InvalidOperationException("Set AzureWebJobsStorage__tableServiceUri (Azure) or AzureWebJobsStorage (local).");
-        var client = new TableClient(connectionString, tableName);
+        var client = new TableClient(connectionString, tableName, options);
         client.CreateIfNotExists();
         return client;
     }

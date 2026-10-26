@@ -272,9 +272,13 @@ az account set --subscription '<subscription id>'
 $rg = 'rg-bglhook-dev'
 az group create -n $rg -l australiaeast
 
-# D2. Deploy the infrastructure: storage (no keys), Key Vault, the Flex Consumption app and its role assignments
+# D2. Deploy the infrastructure: storage (no keys), Key Vault, the Flex Consumption app and its role assignments.
+#     $t17 adds the simulator settings: rejection reasons in responses, and client code 'spike' so the ClientCode
+#     tamper is refused. Set $t17 = $false and repeat D2 before T12; dev.bicepparam alone keeps reasons off.
+$t17 = $true
+$t17Params = if ($t17) { @('--parameters', 'exposeRejectionReason=true', 'expectedClientCode=spike') } else { @() }
 $out = az deployment group create -g $rg --name bglhook-laptop `
-  --parameters bgl-spike/receiver/infra/env/dev.bicepparam --query properties.outputs -o json | ConvertFrom-Json
+  --parameters bgl-spike/receiver/infra/env/dev.bicepparam @t17Params --query properties.outputs -o json | ConvertFrom-Json
 $app = $out.functionAppName.value; $kv = $out.keyVaultName.value; $base = $out.receiverBaseUrl.value
 
 # D3. Let yourself set secrets: Owner doesn't include Key Vault data access under the RBAC model.
@@ -301,7 +305,9 @@ az functionapp deployment source config-zip -g $rg -n $app --src receiver.zip
 
 # D7. Check it and build the URL to register with BGL. The key is percent-encoded because BGL signs the URL exactly
 #     as it calls it. Treat $receiverUrl as a secret: it holds the function key.
-Invoke-RestMethod "https://$($out.functionAppHostName.value)/api/health"   # secretConfigured, forwardConfigured, errorReportConfigured: True
+#     Health needs a key too; the host key works for every function, so keep it out of anything you share.
+$hostKey = az functionapp keys list -g $rg -n $app --query functionKeys.default -o tsv
+Invoke-RestMethod "https://$($out.functionAppHostName.value)/api/health" -Headers @{ 'x-functions-key' = $hostKey }   # secretConfigured, forwardConfigured, errorReportConfigured: True
 $key = az functionapp function keys list -g $rg -n $app --function-name BglWebhook --query default -o tsv
 $receiverUrl = "${base}?code=$([uri]::EscapeDataString($key))"
 ```
@@ -314,12 +320,12 @@ $receiverUrl = "${base}?code=$([uri]::EscapeDataString($key))"
 Invoke-WebRequest -Method Post -Uri $base -Body '{}' -SkipHttpErrorCheck | Select-Object StatusCode   # 401: no function key
 ```
 
-Expect every line **AS EXPECTED**: `None` 200; `Body`, `Signature` and `Url` 401 "Signature mismatch"; `Timestamp` 401 "outside +/-300s"; `ClientCode` 401 "Client code mismatch"; `Replay` 200 with `"duplicate":true`; and the `-BodyStyle Bgl` run 200, the layout a flow trigger couldn't verify (T11). Flow D should run three times (the two `None` messages and the first `Replay` copy) and Flow E five times, all `warning` / `signature`.
+This needs D2 run with `$t17 = $true` (or the workflow's **t17** input). Without it, every rejection shows no reason and the `ClientCode` case is accepted, because BGL doesn't sign the client code. Expect every line **AS EXPECTED**: `None` 200; `Body`, `Signature` and `Url` 401 "Signature mismatch"; `Timestamp` 401 "outside +/-300s"; `ClientCode` 401 "Client code mismatch"; `Replay` 200 with `"duplicate":true`; and the `-BodyStyle Bgl` run 200, the layout a flow trigger couldn't verify (T11). Flow D should run three times (the two `None` messages and the first `Replay` copy) and Flow E five times, all `warning` / `signature`.
 
 **T12** (once BGL has enabled your app for *Send to Audit*, open question 4):
 
 1. Generate a new webhook *Auth – Secret key* in the BGL portal (the old one was typed into a shell during T08), and store it: `az keyvault secret set --vault-name $kv -n bgl-webhook-secret --value (Read-Host 'BGL webhook secret' -MaskInput)`, then repeat D4's refresh call.
-2. Set `exposeRejectionReason = false` in `dev.bicepparam` and redeploy (D2).
+2. Turn off the T17 settings: repeat D2 with `$t17 = $false`, or run the workflow with **t17** unticked. Rejection reasons stop appearing in responses, and the client code check is off until step 4.
 3. Register `$receiverUrl` (with `?code=`) against the **Audit** message type and wait for BGL's approval.
 4. Press *Send to Audit* on a staging fund. Flow D should run once; Flow E should stay quiet. Flow D's trigger outputs show `x-bgl-client-code`: put it in `expectedClientCode` and redeploy.
 
@@ -330,9 +336,12 @@ If a key or secret is ever exposed, regenerate the function key (`az functionapp
 `.github/workflows/receiver.yml` builds, tests and lints on every push that touches `receiver/`, and deploys only when run by hand. It signs in with OIDC, so GitHub stores no Azure secret.
 
 1. Once, as an Owner: `./bgl-spike/receiver/scripts/Setup-GitHubOidc.ps1 -SubscriptionId <id> -ResourceGroup rg-bglhook-dev -GitHubRepository <owner>/<repo> -SetGitHubVariables`. It creates a deployment identity trusted only by the repo's `dev` environment, grants it Contributor plus a role-assignment right limited to the Function's three roles, and gives you Key Vault Secrets Officer.
-2. In the repo's settings, add a required reviewer to the `dev` environment: the repo is public.
-3. *Actions → Receiver → Run workflow*, tick **deploy**. The job runs what-if, deploys the template and the package, and smoke-tests: the new version serves `/api/health`, a call without the key gets 401, and an unsigned call with it gets 401 (500 until the secret is set).
-4. Set the secrets (D3–D4; step 1 already granted D3) and continue from D7.
+   `-SetGitHubVariables` also protects the `dev` environment: only `main` can deploy, and each run waits for a reviewer's approval (you, or `-Reviewer <login>`). That matters because the deployment identity can deploy code that runs as the Function, and the Function can read every Key Vault secret. Without these rules, anyone able to push a branch could deploy their own code. Check *Settings → Environments → dev* shows both rules.
+2. *Actions → Receiver → Run workflow* from `main`, tick **deploy**, and tick **t17** only for T17. Approve the run when it pauses. The job runs what-if, deploys the template and the package, and smoke-tests:
+   - the new version serves `/api/health` (called with the host key);
+   - calls to either endpoint without a key get 401;
+   - an unsigned call with the key gets 401 (500 until the secret is set).
+3. Set the secrets (D3–D4; step 1 already granted D3) and continue from D7.
 
 The laptop and the pipeline deploy the same template to the same resource group, so you can switch between them.
 

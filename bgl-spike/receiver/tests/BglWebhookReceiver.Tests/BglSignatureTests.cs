@@ -73,6 +73,10 @@ public class BglSignatureTests
     public void Rejects_other_client_code() => Assert.Equal("Client code mismatch", Verify(expectedClientCode: "someoneelse").Reason);
 
     [Fact]
+    public void Unsigned_request_does_not_learn_the_expected_client_code()
+        => Assert.Equal("Signature mismatch", Verify(header: $"someoneelse {Timestamp} {Expected}", body: "{}", expectedClientCode: "provider1").Reason);
+
+    [Fact]
     public void Expected_client_code_is_compared_in_lowercase() => Assert.True(Verify(expectedClientCode: "PROVIDER1").IsValid);
 
     [Fact]

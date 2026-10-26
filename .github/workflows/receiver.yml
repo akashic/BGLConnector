@@ -18,6 +18,10 @@ on:
         description: Deploy to the dev environment after building
         type: boolean
         default: false
+      t17:
+        description: T17 simulator settings (rejection reasons in responses, client code 'spike'). Untick before T12.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -81,6 +85,7 @@ jobs:
     env:
       RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
       PARAMETERS: bgl-spike/receiver/infra/env/dev.bicepparam
+      T17: ${{ inputs.t17 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -96,20 +101,23 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
+      # dev.bicepparam keeps rejection reasons off, because BGL is registered against this environment. T17 overrides it.
       - name: What-if
-        run: >
-          az deployment group what-if
-          --resource-group "$RESOURCE_GROUP"
-          --parameters "$PARAMETERS"
-          --result-format ResourceIdOnly
+        run: |
+          overrides=(); [[ "$T17" == "true" ]] && overrides=(--parameters exposeRejectionReason=true expectedClientCode=spike)
+          az deployment group what-if \
+            --resource-group "$RESOURCE_GROUP" \
+            --parameters "$PARAMETERS" "${overrides[@]}" \
+            --result-format ResourceIdOnly
 
       - name: Deploy infrastructure
         id: infra
         run: |
+          overrides=(); [[ "$T17" == "true" ]] && overrides=(--parameters exposeRejectionReason=true expectedClientCode=spike)
           outputs=$(az deployment group create \
             --resource-group "$RESOURCE_GROUP" \
             --name "bglhook-${{ github.run_number }}" \
-            --parameters "$PARAMETERS" \
+            --parameters "$PARAMETERS" "${overrides[@]}" \
             --query properties.outputs --output json)
           echo "functionAppName=$(jq -r .functionAppName.value <<< "$outputs")" >> "$GITHUB_OUTPUT"
           echo "hostName=$(jq -r .functionAppHostName.value <<< "$outputs")" >> "$GITHUB_OUTPUT"
@@ -128,23 +136,28 @@ jobs:
           APP: ${{ steps.infra.outputs.functionAppName }}
           HOST: ${{ steps.infra.outputs.hostName }}
         run: |
-          # Wait for the new build (identified by commit SHA in its version) to be serving.
+          # Wait for the new build (identified by commit SHA in its version) to be serving. Health needs a key; the host
+          # key works for every function, and it's sent as a header so it never needs URL-encoding.
           for i in $(seq 1 20); do
-            health=$(curl -fsS "https://$HOST/api/health" || echo '{}')
+            hostKey=$(az functionapp keys list -g "$RESOURCE_GROUP" -n "$APP" --query functionKeys.default -o tsv 2>/dev/null || true)
+            [[ -n "$hostKey" ]] && echo "::add-mask::$hostKey"
+            health=$(curl -fsS -H "x-functions-key: $hostKey" "https://$HOST/api/health" || echo '{}')
             version=$(jq -r '.version // empty' <<< "$health")
             if [[ "$version" == *"${{ github.sha }}"* ]]; then echo "Serving: $health"; break; fi
             echo "Waiting for new version (got '$version')"; sleep 15
           done
           [[ "$version" == *"${{ github.sha }}"* ]] || { echo "::error::New version did not come up"; exit 1; }
 
-          # Without the function key the platform must refuse the webhook before the code runs.
+          # Without a key the platform must refuse both endpoints before the code runs.
           code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "https://$HOST/api/bgl/webhook" -d '{}')
           [[ "$code" == "401" ]] || { echo "::error::Expected 401 without a function key, got $code"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' "https://$HOST/api/health")
+          [[ "$code" == "401" ]] || { echo "::error::Expected 401 for health without a key, got $code"; exit 1; }
 
           # With the key but no signature the code must refuse it: 401, or 500 while the secret isn't set yet.
           key=$(az functionapp function keys list -g "$RESOURCE_GROUP" -n "$APP" --function-name BglWebhook --query default -o tsv)
           echo "::add-mask::$key"
-          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "https://$HOST/api/bgl/webhook?code=$key" -d '{}')
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "x-functions-key: $key" "https://$HOST/api/bgl/webhook" -d '{}')
           if [[ "$(jq -r .secretConfigured <<< "$health")" == "true" ]]; then
             [[ "$code" == "401" ]] || { echo "::error::Expected 401 for an unsigned call, got $code"; exit 1; }
           else

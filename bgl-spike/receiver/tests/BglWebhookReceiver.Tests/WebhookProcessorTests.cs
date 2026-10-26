@@ -22,18 +22,24 @@ public class WebhookProcessorTests
     {
         public HashSet<EventKey> Keys { get; } = [];
         public bool Throw { get; set; }
+        public bool ThrowAfterAdd { get; set; } // the write reached the table but the call failed (e.g. a timeout)
         public Task<bool> TryAddAsync(EventKey key, BglEvent evt, CancellationToken cancellationToken)
-            => Throw ? throw new InvalidOperationException("store down") : Task.FromResult(Keys.Add(key));
+        {
+            if (Throw) throw new InvalidOperationException("store down");
+            var added = Keys.Add(key);
+            return ThrowAfterAdd ? throw new TimeoutException("store slow") : Task.FromResult(added);
+        }
         public Task RemoveAsync(EventKey key, CancellationToken cancellationToken) { Keys.Remove(key); return Task.CompletedTask; }
     }
 
-    private sealed class FakeForwarder(bool configured = true, bool succeed = true) : IEventForwarder
+    private sealed class FakeForwarder(bool configured = true, bool succeed = true, Exception? throws = null) : IEventForwarder
     {
         public List<byte[]> Sent { get; } = [];
         public List<string?> ClientCodes { get; } = [];
         public bool IsConfigured => configured;
         public Task<ForwardResult> ForwardAsync(ReadOnlyMemory<byte> body, BglEvent evt, string? clientCode, CancellationToken cancellationToken)
         {
+            if (throws is not null) throw throws;
             Sent.Add(body.ToArray());
             ClientCodes.Add(clientCode);
             return Task.FromResult(new ForwardResult(succeed, succeed ? "HTTP 202" : "HTTP 500"));
@@ -73,7 +79,7 @@ public class WebhookProcessorTests
     {
         var h = Create();
         var bglLayout = Body.Replace(",", ",\n");
-        var outcome = await h.Processor.ProcessAsync(Signed(bglLayout), default);
+        var outcome = await h.Processor.ProcessAsync(Signed(bglLayout));
         Assert.Equal(200, outcome.StatusCode);
         Assert.Equal(WebhookOutcome.Accepted, outcome.Message);
         Assert.Equal(Encoding.UTF8.GetBytes(bglLayout), Assert.Single(h.Forwarder.Sent));
@@ -85,8 +91,8 @@ public class WebhookProcessorTests
     public async Task Duplicate_event_is_accepted_but_not_forwarded_again()
     {
         var h = Create();
-        await h.Processor.ProcessAsync(Signed(), default);
-        var second = await h.Processor.ProcessAsync(Signed(), default);
+        await h.Processor.ProcessAsync(Signed());
+        var second = await h.Processor.ProcessAsync(Signed());
         Assert.Equal(200, second.StatusCode);
         Assert.True(second.Duplicate);
         Assert.Single(h.Forwarder.Sent);
@@ -109,7 +115,7 @@ public class WebhookProcessorTests
             "clientCode" => Signed(clientCode: "someoneelse"),
             _ => Signed(timestamp: Now.AddHours(-2).ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", System.Globalization.CultureInfo.InvariantCulture)),
         };
-        var outcome = await h.Processor.ProcessAsync(request, default);
+        var outcome = await h.Processor.ProcessAsync(request);
         Assert.Equal(401, outcome.StatusCode);
         Assert.Empty(h.Forwarder.Sent);
         Assert.Empty(h.Store.Keys);
@@ -122,7 +128,7 @@ public class WebhookProcessorTests
     public async Task Signature_covers_the_function_key_in_the_query_string()
     {
         var h = Create();
-        var outcome = await h.Processor.ProcessAsync(Signed() with { QueryString = "?code=other-key" }, default);
+        var outcome = await h.Processor.ProcessAsync(Signed() with { QueryString = "?code=other-key" });
         Assert.Equal(401, outcome.StatusCode);
     }
 
@@ -131,7 +137,7 @@ public class WebhookProcessorTests
     {
         var full = "https://custom.example.com/bgl?code=k";
         var h = Create(new ReceiverOptions { ReceiverUrl = full, ReceiverBaseUrl = BaseUrl, WebhookSecret = Secret });
-        var outcome = await h.Processor.ProcessAsync(Signed(url: full), default);
+        var outcome = await h.Processor.ProcessAsync(Signed(url: full));
         Assert.Equal(200, outcome.StatusCode);
     }
 
@@ -143,7 +149,7 @@ public class WebhookProcessorTests
     {
         var h = Create(new ReceiverOptions { ReceiverBaseUrl = BaseUrl, WebhookSecret = secret });
         // A header signed with the literal Key Vault reference text must not be accepted.
-        var outcome = await h.Processor.ProcessAsync(Signed(secret: secret ?? "x"), default);
+        var outcome = await h.Processor.ProcessAsync(Signed(secret: secret ?? "x"));
         Assert.Equal(500, outcome.StatusCode);
         Assert.Equal("config", Assert.Single(h.Reporter.Reports).Stage);
         Assert.Empty(h.Forwarder.Sent);
@@ -153,7 +159,7 @@ public class WebhookProcessorTests
     public async Task Missing_receiver_url_fails_closed()
     {
         var h = Create(new ReceiverOptions { WebhookSecret = Secret });
-        Assert.Equal(500, (await h.Processor.ProcessAsync(Signed(), default)).StatusCode);
+        Assert.Equal(500, (await h.Processor.ProcessAsync(Signed())).StatusCode);
     }
 
     [Theory]
@@ -163,7 +169,7 @@ public class WebhookProcessorTests
     public async Task Signed_but_unusable_body_is_rejected_with_400(string body)
     {
         var h = Create();
-        var outcome = await h.Processor.ProcessAsync(Signed(body), default);
+        var outcome = await h.Processor.ProcessAsync(Signed(body));
         Assert.Equal(400, outcome.StatusCode);
         Assert.Empty(h.Forwarder.Sent);
     }
@@ -173,27 +179,57 @@ public class WebhookProcessorTests
     {
         var failing = new FakeForwarder(succeed: false);
         var h = Create(forwarder: failing);
-        var outcome = await h.Processor.ProcessAsync(Signed(), default);
+        var outcome = await h.Processor.ProcessAsync(Signed());
         Assert.Equal(503, outcome.StatusCode);
         Assert.Empty(h.Store.Keys);
         Assert.Equal("forward", Assert.Single(h.Reporter.Reports).Stage);
     }
 
-    [Fact]
-    public async Task Event_store_failure_returns_503()
+    [Theory]
+    [InlineData(typeof(OperationCanceledException))] // the host shutting down mid hand-off
+    [InlineData(typeof(FormatException))]            // anything else unexpected
+    public async Task Hand_off_that_throws_still_forgets_the_event(Type exceptionType)
+    {
+        var h = Create(forwarder: new FakeForwarder(throws: (Exception)Activator.CreateInstance(exceptionType)!));
+        var outcome = await h.Processor.ProcessAsync(Signed());
+        Assert.Equal(503, outcome.StatusCode);
+        Assert.Empty(h.Store.Keys);
+        Assert.Equal("forward", Assert.Single(h.Reporter.Reports).Stage);
+        // BGL's retry is then forwarded, not dropped as a duplicate.
+        var retry = await new WebhookProcessor(Options.Create(new ReceiverOptions { ReceiverBaseUrl = BaseUrl, WebhookSecret = Secret }),
+            h.Store, new FakeForwarder(), new FakeReporter(), new FixedTime(Now), NullLogger<WebhookProcessor>.Instance).ProcessAsync(Signed());
+        Assert.Equal(200, retry.StatusCode);
+        Assert.False(retry.Duplicate);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Event_store_failure_returns_503_and_leaves_no_record(bool afterAdd)
     {
         var h = Create();
-        h.Store.Throw = true;
-        var outcome = await h.Processor.ProcessAsync(Signed(), default);
+        if (afterAdd) h.Store.ThrowAfterAdd = true; else h.Store.Throw = true;
+        var outcome = await h.Processor.ProcessAsync(Signed());
         Assert.Equal(503, outcome.StatusCode);
         Assert.Empty(h.Forwarder.Sent);
+        Assert.Empty(h.Store.Keys);
+        Assert.Equal("dedupe", Assert.Single(h.Reporter.Reports).Stage);
     }
+
+    [Theory]
+    [InlineData("039403940", "039403940")]
+    [InlineData("8ad08a06-6555-bb32", "8ad08a06-6555-bb32")]
+    [InlineData("a\nb", "a%0Ab")]
+    [InlineData("caf\u00e9", "caf%C3%A9")]
+    [InlineData(null, "")]
+    public void Forwarded_header_values_are_always_valid(string? value, string expected)
+        => Assert.Equal(expected, HttpEventForwarder.HeaderValue(value is null ? null : System.Text.RegularExpressions.Regex.Unescape(value)));
 
     [Fact]
     public async Task Without_a_forward_url_the_event_is_accepted_and_recorded()
     {
         var h = Create(forwarder: new FakeForwarder(configured: false));
-        var outcome = await h.Processor.ProcessAsync(Signed(), default);
+        var outcome = await h.Processor.ProcessAsync(Signed());
         Assert.Equal(200, outcome.StatusCode);
         Assert.Single(h.Store.Keys);
     }

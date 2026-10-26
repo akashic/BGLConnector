@@ -33,41 +33,48 @@ public sealed partial class WebhookProcessor(
             : ConfiguredValue.IsSet(o.ReceiverBaseUrl) ? o.ReceiverBaseUrl + (queryString ?? string.Empty)
             : null;
 
-    public async Task<WebhookOutcome> ProcessAsync(WebhookRequest request, CancellationToken cancellationToken)
+    /// <remarks>
+    /// Takes no cancellation token. Once the signature checks out, the event is recorded before it's handed off, and
+    /// stopping between the two (BGL hanging up, the host shutting down) would leave it recorded but never forwarded,
+    /// so BGL's retry would be dropped as a duplicate. Each step relies on its own timeout instead.
+    /// </remarks>
+    public async Task<WebhookOutcome> ProcessAsync(WebhookRequest request)
     {
         var o = options.Value;
 
         // Fail closed on configuration before looking at the message.
         if (!ConfiguredValue.IsSet(o.WebhookSecret))
             return await FailAsync(500, "Receiver misconfigured", "Webhook secret not set, or its Key Vault reference did not resolve",
-                "config", request, null, cancellationToken);
+                "config", request, null);
         var url = ResolveSignedUrl(o, request.QueryString);
         if (url is null)
-            return await FailAsync(500, "Receiver misconfigured", "Bgl__ReceiverBaseUrl is not set", "config", request, null, cancellationToken);
+            return await FailAsync(500, "Receiver misconfigured", "Bgl__ReceiverBaseUrl is not set", "config", request, null);
 
         var signature = BglSignature.Verify(request.AuthorizationHeader, url, request.Body, o.WebhookSecret,
             o.ExpectedClientCode, o.MaxSkewSeconds, time.GetUtcNow());
         if (!signature.IsValid)
-            return await FailAsync(401, "Unauthorized", signature.Reason, "signature", request, null, cancellationToken);
+            return await FailAsync(401, "Unauthorized", signature.Reason, "signature", request, null);
 
         BglEvent evt;
         try { evt = BglEvent.Parse(request.Body); }
         catch (JsonException ex)
         {
-            return await FailAsync(400, "Bad request", $"Body is not a JSON object: {ex.Message}", "parse", request, null, cancellationToken);
+            return await FailAsync(400, "Bad request", $"Body is not a JSON object: {ex.Message}", "parse", request, null);
         }
 
         if (string.IsNullOrWhiteSpace(evt.EventId))
-            return await FailAsync(400, "Bad request", "eventId missing", "parse", request, evt, cancellationToken);
+            return await FailAsync(400, "Bad request", "eventId missing", "parse", request, evt);
 
         // Record the event before handing it off: a captured message replayed within the skew window, or a BGL retry,
         // is then accepted without being forwarded twice.
         var key = EventKey.For(evt);
         bool added;
-        try { added = await store.TryAddAsync(key, evt, cancellationToken); }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        try { added = await store.TryAddAsync(key, evt, CancellationToken.None); }
+        catch (Exception ex)
         {
-            return await FailAsync(503, "Temporarily unavailable", $"Event store failed: {ex.GetType().Name}", "dedupe", request, evt, cancellationToken);
+            // The add may have reached the table before failing (a timeout, say); forget it so BGL's retry isn't a duplicate.
+            await ForgetAsync(key, evt);
+            return await FailAsync(503, "Temporarily unavailable", $"Event store failed: {ex.GetType().Name}", "dedupe", request, evt);
         }
 
         if (!added)
@@ -82,23 +89,34 @@ public sealed partial class WebhookProcessor(
             return new(200, WebhookOutcome.Accepted, EventId: evt.EventId);
         }
 
-        var forwarded = await forwarder.ForwardAsync(request.Body, evt, signature.ClientCode, cancellationToken);
+        // From here every way out must either forward the event or forget it.
+        ForwardResult forwarded;
+        try { forwarded = await forwarder.ForwardAsync(request.Body, evt, signature.ClientCode, CancellationToken.None); }
+        catch (Exception ex) { forwarded = new(false, ex.GetType().Name); }
+
         if (!forwarded.Succeeded)
         {
             // Forget the event so BGL's retry (if any) is processed instead of dropped as a duplicate.
-            try { await store.RemoveAsync(key, cancellationToken); }
-            catch (Exception ex) when (ex is not OperationCanceledException) { LogRemoveFailed(evt.EventId, ex.GetType().Name); }
+            await ForgetAsync(key, evt);
             return await FailAsync(503, "Temporarily unavailable", $"Hand-off to Power Automate failed: {forwarded.Detail}",
-                "forward", request, evt, cancellationToken);
+                "forward", request, evt);
         }
 
         LogForwarded(evt.EventId, evt.EventType);
         return new(200, WebhookOutcome.Accepted, EventId: evt.EventId);
     }
 
-    /// <summary>Logs and reports a rejection or failure, then returns the outcome.</summary>
+    private async Task ForgetAsync(EventKey key, BglEvent evt)
+    {
+        try { await store.RemoveAsync(key, CancellationToken.None); }
+        catch (Exception ex) { LogRemoveFailed(evt.EventId, ex.GetType().Name); }
+    }
+
+    /// <summary>
+    /// Logs and reports a rejection or failure, then returns the outcome. The report is sent even if BGL has hung up.
+    /// </summary>
     internal async Task<WebhookOutcome> FailAsync(int status, string message, string reason, string stage,
-        WebhookRequest request, BglEvent? evt, CancellationToken cancellationToken)
+        WebhookRequest request, BglEvent? evt)
     {
         LogRejected(status, stage, reason, evt?.EventId);
         await errors.ReportAsync(new ErrorReport(
@@ -111,7 +129,7 @@ public sealed partial class WebhookProcessor(
             EventType: evt?.EventType,
             InvocationId: request.InvocationId,
             TimestampUtc: time.GetUtcNow(),
-            Version: Version), cancellationToken);
+            Version: Version), CancellationToken.None);
         return new(status, message, reason, evt?.EventId);
     }
 
@@ -127,6 +145,6 @@ public sealed partial class WebhookProcessor(
     [LoggerMessage(Level = LogLevel.Information, Message = "Event {EventId} ({EventType}) forwarded")]
     private partial void LogForwarded(string? eventId, string? eventType);
 
-    [LoggerMessage(Level = LogLevel.Error, Message = "Couldn't remove event {EventId} after a failed hand-off ({Error}); a BGL retry will be dropped as a duplicate")]
+    [LoggerMessage(Level = LogLevel.Error, Message = "Couldn't remove event {EventId} after a failure ({Error}); a BGL retry will be dropped as a duplicate")]
     private partial void LogRemoveFailed(string? eventId, string error);
 }

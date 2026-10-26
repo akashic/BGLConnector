@@ -35,10 +35,6 @@ public static class BglSignature
         if (parts.Length != 3) return new(false, $"Expected 3 header parts, got {parts.Length}");
         var clientCode = parts[0];
 
-        if (!string.IsNullOrEmpty(expectedClientCode)
-            && !string.Equals(clientCode, expectedClientCode.ToLowerInvariant(), StringComparison.Ordinal))
-            return new(false, "Client code mismatch", clientCode);
-
         if (!DateTimeOffset.TryParse(parts[1], CultureInfo.InvariantCulture,
                 DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var timestamp))
             return new(false, "Timestamp not parseable", clientCode);
@@ -47,6 +43,12 @@ public static class BglSignature
         var expected = Compute(parts[1], url, body, secret);
         if (!CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(expected), Encoding.ASCII.GetBytes(parts[2])))
             return new(false, "Signature mismatch", clientCode, skew);
+
+        // Checked after the signature, so an unsigned request can't use the rejection reason to find the expected code.
+        // BGL doesn't sign the client code, so this guards against a misconfigured registration, not forgery.
+        if (!string.IsNullOrEmpty(expectedClientCode)
+            && !string.Equals(clientCode, expectedClientCode.ToLowerInvariant(), StringComparison.Ordinal))
+            return new(false, "Client code mismatch", clientCode, skew);
         if (maxSkewSeconds > 0 && Math.Abs(skew) > maxSkewSeconds)
             return new(false, $"Signature valid but timestamp outside +/-{maxSkewSeconds}s", clientCode, skew);
 

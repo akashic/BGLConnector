@@ -24,9 +24,9 @@ public sealed partial class HttpEventForwarder(IHttpClientFactory httpClientFact
         using var content = new ReadOnlyMemoryContent(body);
         content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
         using var request = new HttpRequestMessage(HttpMethod.Post, options.Value.AuditForwardUrl) { Content = content };
-        request.Headers.Add("x-bgl-event-id", evt.EventId);
-        request.Headers.Add("x-bgl-event-type", evt.EventType ?? string.Empty);
-        request.Headers.Add("x-bgl-client-code", clientCode ?? string.Empty);
+        request.Headers.Add("x-bgl-event-id", HeaderValue(evt.EventId));
+        request.Headers.Add("x-bgl-event-type", HeaderValue(evt.EventType));
+        request.Headers.Add("x-bgl-client-code", HeaderValue(clientCode));
         try
         {
             using var response = await httpClientFactory.CreateClient(ClientName).SendAsync(request, cancellationToken);
@@ -41,6 +41,15 @@ public sealed partial class HttpEventForwarder(IHttpClientFactory httpClientFact
             return new(false, ex is TaskCanceledException ? "timed out" : ex.GetType().Name);
         }
     }
+
+    /// <summary>
+    /// Values come from BGL's body and header, so a character a header can't carry (a newline, non-ASCII) is possible.
+    /// Such a value is percent-encoded rather than allowed to throw. Ordinary IDs pass through unchanged.
+    /// </summary>
+    internal static string HeaderValue(string? value)
+        => string.IsNullOrEmpty(value) ? string.Empty
+            : value.All(c => c is >= ' ' and <= '~') ? value
+            : Uri.EscapeDataString(value);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Forwarding to Power Automate failed: {Error}")]
     private partial void LogForwardFailed(string error);
